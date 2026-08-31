@@ -79,7 +79,6 @@ import type {
 } from "./hooks/use-hub-model-search";
 import { useHubModelVram } from "./hooks/use-hub-model-vram";
 import { useModelsSelection } from "./hooks/use-models-selection";
-import { resolveSelectionUrlSync } from "./lib/selection-resolution";
 import { useHubInventory } from "./inventory";
 import { LOCAL_MODEL_SOURCE } from "./inventory/constants";
 import { settingsGgufVariantForRow } from "./inventory/settings-identity";
@@ -1163,7 +1162,6 @@ export function ModelsPage() {
 
   const {
     selectedId,
-    selectionInputId,
     setSelected,
     selectedModel,
     metadataUnavailable,
@@ -1177,7 +1175,6 @@ export function ModelsPage() {
     filteredDiscoverRows: selectionFilteredDiscoverRows,
     filteredCachedRows,
     filteredLocalRows,
-    downloadedReady,
     results: selectionResults,
     accessToken: apiHfToken,
     online,
@@ -1185,12 +1182,13 @@ export function ModelsPage() {
 
   const handleSelect = useCallback(
     (id: string) => {
+      setSelected(id);
       void navigate({
         to: "/hub",
         search: (prev) => ({ ...prev, model: id, file: undefined }),
       });
     },
-    [navigate],
+    [setSelected, navigate],
   );
   const handleCloseDetail = useCallback(() => {
     // From split view, "Back to Hub" returns to the main hub feed (not the filtered list): leave
@@ -1246,35 +1244,10 @@ export function ModelsPage() {
   );
 
   useEffect(() => {
-    const sync = resolveSelectionUrlSync({
-      isDiscoverTab,
-      urlModel,
-      selectionInputId,
-      resolvedSelectedId: selectedId,
-      resolvedModelFormat: selectedModel?.modelFormat ?? null,
-    });
-    if (sync?.action === "select") {
-      setSelected(sync.selectedId);
-    } else if (sync?.action === "replace") {
-      void navigate({
-        to: "/hub",
-        search: (prev) => ({
-          ...prev,
-          model: sync.selectedId,
-          file: sync.preserveGgufFile ? prev.file : undefined,
-        }),
-        replace: true,
-      });
+    if (urlModel !== selectedId) {
+      setSelected(urlModel);
     }
-  }, [
-    isDiscoverTab,
-    navigate,
-    selectedId,
-    selectedModel?.modelFormat,
-    selectionInputId,
-    setSelected,
-    urlModel,
-  ]);
+  }, [urlModel, selectedId, setSelected]);
 
   // Track the last non-split layout so leaving split mode restores it.
   useEffect(() => {
@@ -1292,6 +1265,7 @@ export function ModelsPage() {
       ? listRows[0]?.id
       : (filteredCachedRows[0]?.id ?? filteredLocalRows[0]?.id);
     if (!firstId) return;
+    setSelected(firstId);
     void navigate({
       to: "/hub",
       search: (prev) => ({ ...prev, model: firstId, file: undefined }),
@@ -1304,6 +1278,7 @@ export function ModelsPage() {
     listRows,
     filteredCachedRows,
     filteredLocalRows,
+    setSelected,
     navigate,
   ]);
 

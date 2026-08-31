@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useLatestRef } from "../hooks/use-latest-ref";
 import type { ResolvedTransport } from "./constants";
@@ -11,7 +11,6 @@ import {
   type JobListeners,
   downloadManager,
   jobKeyOf,
-  repoKeyOf,
   selectActiveJob,
   subscribeJobListeners,
   useDownloadManagerStore,
@@ -116,45 +115,12 @@ export function useRepoDownload(config: RepoDownloadConfig): DownloadJob {
     () => jobKeyOf(kind, repoId, activeVariant ?? null),
     [activeVariant, kind, repoId],
   );
-  const repoConflictKey = useMemo(
-    () => repoKeyOf(kind, repoId),
-    [kind, repoId],
+  const transportConflict = useDownloadManagerStore(
+    (state) => state.conflicts[conflictKey]?.info ?? null,
   );
-  const visibleConflict = useDownloadManagerStore(
-    useShallow((state) => {
-      const exact = state.conflicts[conflictKey];
-      if (exact) return { key: conflictKey, info: exact.info };
-      const scoped = Object.entries(state.conflicts).find(([key]) =>
-        key.startsWith(`${repoConflictKey}#`),
-      );
-      return scoped
-        ? { key: scoped[0], info: scoped[1].info }
-        : { key: conflictKey, info: null };
-    }),
-  );
-  const visibleConflictKey = visibleConflict.key;
-  const transportConflict = visibleConflict.info;
 
-  // Chat and Video staging park this hook on an idle repo id when the queue
-  // clears. Keep that conflict for Hub, but remember its key so a later real
-  // repo replacement clears the superseded request.
-  const repoIdRef = useRef(repoId);
-  const preservedConflictKeyRef = useRef<string | null>(null);
-  repoIdRef.current = repoId;
   useEffect(
     () => () => {
-      const parked = repoIdRef.current;
-      if (
-        parked === "__staged_download_idle__" ||
-        parked === "__hub_autoload_idle__"
-      ) {
-        preservedConflictKeyRef.current = conflictKey;
-        return;
-      }
-      if (preservedConflictKeyRef.current) {
-        downloadManager.cancelConflict(preservedConflictKeyRef.current);
-        preservedConflictKeyRef.current = null;
-      }
       downloadManager.cancelConflict(conflictKey);
     },
     [conflictKey],
@@ -192,16 +158,16 @@ export function useRepoDownload(config: RepoDownloadConfig): DownloadJob {
   );
 
   const resumeConflict = useCallback(
-    () => downloadManager.resumeConflict(visibleConflictKey),
-    [visibleConflictKey],
+    () => downloadManager.resumeConflict(conflictKey),
+    [conflictKey],
   );
   const restartConflict = useCallback(
-    () => downloadManager.restartConflict(visibleConflictKey),
-    [visibleConflictKey],
+    () => downloadManager.restartConflict(conflictKey),
+    [conflictKey],
   );
   const cancelConflict = useCallback(
-    () => downloadManager.cancelConflict(visibleConflictKey),
-    [visibleConflictKey],
+    () => downloadManager.cancelConflict(conflictKey),
+    [conflictKey],
   );
 
   const progress = useMemo<DownloadJobProgress | null>(

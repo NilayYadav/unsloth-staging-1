@@ -425,6 +425,7 @@ from core.inference.tool_call_parser import (
 )
 from core.inference.passthrough_healing import nudge_enabled as _nudge_enabled
 from core.inference.repetition_guard import is_repetition_dominated
+from core.inference.mcp_images import append_image_turn as append_mcp_image_turn
 from core.inference.tool_loop_controller import (
     ToolLoopController,
     append_deferred_nudges,
@@ -6357,26 +6358,6 @@ class LlamaCppBackend:
     @property
     def chat_template_override(self) -> Optional[str]:
         return self._chat_template_override
-
-    def _effective_chat_template(self, chat_template_override: Optional[str]) -> Optional[str]:
-        """The template to launch with: the caller's override, else a repaired copy of the
-        GGUF's own when llama-server's Jinja cannot parse it.
-
-        The repair stays out of ``_chat_template_override``, which the reload check
-        compares against the request's intent -- a value no request sends would reload the
-        model on every Apply.
-        """
-        if chat_template_override:
-            return chat_template_override
-        from core.inference.chat_template_helpers import repair_numeric_member_access
-
-        repaired = repair_numeric_member_access(self._chat_template)
-        if repaired:
-            logger.warning(
-                "The GGUF's chat template indexes with numeric member access, which "
-                "llama-server's Jinja rejects; launching with a repaired copy"
-            )
-        return repaired
 
     @property
     def supports_reasoning(self) -> bool:
@@ -21441,19 +21422,15 @@ class LlamaCppBackend:
                 if _paravirtual_cpu_forced:
                     _pv_split_mode_pin = _paravirtual_split_mode_pin(extra_args)
 
+                # Apply custom chat template override if provided.
                 self._chat_template_override = chat_template_override
-                _effective_template = self._effective_chat_template(chat_template_override)
-                if _effective_template:
+                if chat_template_override:
                     import tempfile
 
                     flags = detect_reasoning_flags(
-                        _effective_template,
+                        chat_template_override,
                         self._model_identifier,
-                        log_source = (
-                            "GGUF chat template override"
-                            if chat_template_override
-                            else "repaired GGUF chat template"
-                        ),
+                        log_source = "GGUF chat template override",
                     )
                     self._supports_reasoning = flags["supports_reasoning"]
                     self._reasoning_style = flags["reasoning_style"]
@@ -21470,7 +21447,7 @@ class LlamaCppBackend:
                         delete = False,
                         prefix = "unsloth_chat_template_",
                     )
-                    self._chat_template_file.write(_effective_template)
+                    self._chat_template_file.write(chat_template_override)
                     self._chat_template_file.close()
                     cmd.extend(["--chat-template-file", self._chat_template_file.name])
                     logger.info(f"Using custom chat template file: {self._chat_template_file.name}")
@@ -29705,6 +29682,9 @@ class LlamaCppBackend:
                 # Which tools those no-ops were about, so the flush below can tell
                 # whether the trailing result belongs to the same tool.
                 deferred_noop_tools: set = set()
+                # Images MCP tools returned this batch, shown to the model as one
+                # user turn once the whole batch has been appended.
+                batch_mcp_images: list = []
 
                 # The text-path provisional card uses the parser's default id ("call_0");
                 # a Mistral-style call carries its own id and would open a duplicate. Reuse
@@ -30523,6 +30503,7 @@ class LlamaCppBackend:
                     _forced_choice_resolved = True
                     yield completion.tool_end_event()
                     conversation.append(completion.tool_message())
+                    batch_mcp_images.extend(completion.mcp_images())
                     if _compact_after_execution and decision.tool_call_id:
                         # The promise the gate made when it let this run. Applied here
                         # rather than on the next pass because the next pass may not
@@ -30611,6 +30592,9 @@ class LlamaCppBackend:
                         )
                         assistant_appended = True
                     append_deferred_nudges(conversation, deferred_noop_msgs)
+
+                if batch_mcp_images and self.is_vision:
+                    append_mcp_image_turn(conversation, batch_mcp_images)
 
                 # Close provisional cards not resolved by execution/no-op handling.
                 for _pid, _pname in provisional_started_tool_calls.items():

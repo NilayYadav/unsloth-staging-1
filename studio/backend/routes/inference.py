@@ -1703,49 +1703,6 @@ _OPENAI_LLAMA_ADMISSION_IMAGE_TOKENS = (
     _OPENAI_LLAMA_ADMISSION_IMAGE_EMBEDDING_CAP + _OPENAI_LLAMA_ADMISSION_IMAGE_WRAPPER_TOKENS
 )
 
-# An ESTIMATE where the rest of the sizing is a bound: a run that generates more is
-# undercharged until something re-costs it, which a tool loop does every round boundary and
-# a plain chat cannot yet, so on a full cache a long uncapped generation can still overrun.
-_OPENAI_LLAMA_ADMISSION_UNSTATED_OUTPUT_TOKENS = (
-    _positive_int_or_none(os.environ.get("UNSLOTH_LLAMA_ADMISSION_UNSTATED_OUTPUT_TOKENS")) or 1024
-)
-
-
-def _openai_llama_admission_context_window(llama_backend) -> Optional[int]:
-    """One slot, which under ``--no-kv-unified`` is 1/N of the aggregate budget."""
-    return _positive_int_or_none(getattr(llama_backend, "context_length", None))
-
-
-def _openai_llama_admission_output_allowance(
-    cap: Optional[int],
-    *,
-    budget: int,
-    prompt_tokens: int,
-    context_window: Optional[int] = None,
-    share: Optional[int] = None,
-) -> int:
-    """KV to reserve for what a request may still generate.
-
-    A cap at or above the window is not a cap: `_build_passthrough_payload` sends
-    max_tokens = backend_ctx and "Max" sends the context length, so both mean unstated, and
-    charging the window for either serialises the queue. Measured against the per-request
-    window, since the budget is N times larger under --no-kv-unified.
-
-    Invariant when a ``share`` is known: an unstated request costs at most its fair share of
-    the cache, so ``capacity`` of them always fit. A flat allowance breaks that on a small
-    cache, where 1024 is most of a share on its own (4096 over four slots admitted three).
-    A prompt already past its share keeps the flat allowance, since it does not fit either
-    way and a zero allowance would only hide that it will still generate.
-    """
-    window = context_window or budget
-    if cap is not None and cap < window:
-        return cap
-    # Clamped to the WINDOW: a request cannot occupy more KV than its own slot holds.
-    allowance = min(_OPENAI_LLAMA_ADMISSION_UNSTATED_OUTPUT_TOKENS, max(0, window - prompt_tokens))
-    if share is not None and share > prompt_tokens:
-        allowance = min(allowance, share - prompt_tokens)
-    return allowance
-
 
 def _extra_args_image_max_tokens(extra_args) -> Optional[int]:
     """The ``--image-max-tokens N`` a load passed through, or None. Last wins.
@@ -1920,7 +1877,6 @@ def _openai_llama_admission_tokens(
     tool_loop: bool = False,
     image_tokens: int = _OPENAI_LLAMA_ADMISSION_IMAGE_TOKENS,
     injected_tools = None,
-    context_window: Optional[int] = None,
 ) -> Optional[int]:
     """KV a request will occupy: what is sent, plus what it may generate.
 
@@ -1963,14 +1919,16 @@ def _openai_llama_admission_tokens(
             getattr(payload, "max_completion_tokens", None),
         )
     )
-    # Reserving the rest of the budget for either made concurrency 1 for the default chat.
-    output_tokens = _openai_llama_admission_output_allowance(
-        cap,
-        budget = budget,
-        prompt_tokens = prompt_tokens,
-        context_window = context_window,
-        share = max(1, budget // max(1, capacity)),
-    )
+    if cap is None:
+        # No cap at all. _build_passthrough_payload then sends max_tokens = backend_ctx,
+        # so generation may run until the window is full, and reserving nothing let short
+        # uncapped prompts hold tiny commitments while each consumed most of the cache.
+        # The honest reservation is the rest of the budget, which does serialise
+        # concurrent uncapped requests. That is the true cost of not naming a cap: the
+        # alternative is admitting two runs that llama.cpp will then kill.
+        output_tokens = max(0, budget - prompt_tokens)
+    else:
+        output_tokens = cap
     # A tool loop opens at its own estimate with an equal share as the floor, and re-costs
     # as it grows (generate_chat_completion_with_tools on_conversation_grew ->
     # lease.recost_waiting). The floor keeps re-costing rare: under its share a run never
@@ -2029,7 +1987,6 @@ def _openai_llama_admission_reserve(
             tool_loop = tool_loop,
             image_tokens = _openai_llama_admission_image_tokens(llama_backend),
             injected_tools = injected_tools,
-            context_window = _openai_llama_admission_context_window(llama_backend),
         )
         if payload is not None
         else None,
@@ -2095,16 +2052,12 @@ def _openai_llama_admission_recost(
             message_image_parts = message_image_parts,
             image_tokens = _openai_llama_admission_image_tokens(llama_backend),
         )
-        # Reading "Max" literally here would put the run back on the whole cache at its
-        # first round boundary.
+        if output_tokens is None:
+            # No cap named, so generation is bounded only by the window, as the opening
+            # estimate assumes. Charging zero here dropped an uncapped loop to its share
+            # on round zero while its generations could still fill most of the cache.
+            output_tokens = max(0, budget - prompt_tokens)
         share = max(1, budget // max(1, capacity))
-        output_tokens = _openai_llama_admission_output_allowance(
-            output_tokens,
-            budget = budget,
-            prompt_tokens = prompt_tokens,
-            context_window = _openai_llama_admission_context_window(llama_backend),
-            share = share,
-        )
         want = max(1, min(budget, max(share, prompt_tokens + max(0, output_tokens))))
         lease.recost_waiting(
             want,
@@ -3078,6 +3031,11 @@ from state.tool_approvals import resolve_tool_decision
 from core.inference.model_ids import display_model_name, model_id_matches, public_model_id
 from core.inference.api_monitor import api_monitor
 from core.inference.llama_http import nonstreaming_client
+from core.inference.mcp_images import (
+    has_images as mcp_images_sentinel_in,
+    promote_history as promote_mcp_history_images,
+    split_images as split_mcp_images,
+)
 from core.inference.tool_call_parser import (
     _strip_function_xml_calls,
     _strip_gemma_wrapperless_calls,
@@ -7138,7 +7096,16 @@ def _messages_have_remote_image(messages) -> bool:
 def _request_has_image(payload) -> bool:
     if getattr(payload, "image_base64", None):
         return True
-    return _messages_have_image(payload.messages)
+    if _messages_have_image(payload.messages):
+        return True
+    # A replayed MCP envelope is decoded and re-encoded like any other image, so
+    # it belongs off the event loop for the same reason.
+    return any(
+        message.role == "tool"
+        and isinstance(message.content, str)
+        and mcp_images_sentinel_in(message.content)
+        for message in payload.messages
+    )
 
 
 def _anthropic_request_has_image(payload) -> bool:
@@ -17840,6 +17807,8 @@ def _extract_content_parts(messages: list) -> tuple[str, list[dict], "Optional[s
 
         if combined_text is None:
             continue
+        if msg.role == "tool":
+            combined_text = split_mcp_images(combined_text)[0]
         chat_message = {"role": msg.role, "content": combined_text}
         if msg.role == "assistant" and msg.reasoning_content:
             chat_message["reasoning_content"] = msg.reasoning_content
@@ -18359,7 +18328,7 @@ def _build_external_messages(
                 entry["tool_calls"] = _replay_tool_call_ids(entry["tool_calls"], replay_ids)
             if isinstance(entry.get("tool_call_id"), str):
                 entry["tool_call_id"] = replay_ids.get(entry["tool_call_id"], entry["tool_call_id"])
-    return result
+    return promote_mcp_history_images(result, vision = supports_vision)
 
 
 async def _proxy_to_external_provider(
@@ -18725,6 +18694,7 @@ async def _proxy_to_external_provider(
                 response_format = _extract_response_format(payload),
                 tool_choice = payload.tool_choice,
                 continue_final_message = _continue_final_message(payload),
+                supports_vision = model_supports_vision,
             )
             policy = (
                 CodexToolPolicy(
@@ -19054,6 +19024,7 @@ async def _proxy_to_external_provider(
                     model = model,
                     tool_choice = payload.tool_choice,
                     continue_final_message = _continue_final_message(payload),
+                    supports_vision = _supports_vision,
                 ),
                 policy = ToolLoopPolicy(
                     tools = external_studio_tools,
@@ -30109,8 +30080,16 @@ def _openai_messages_for_passthrough(payload) -> list[dict]:
     against a reservation for one: 4417 reserved against 8466 charged, which overcommits
     the KV cache wherever the slot count lets that gap accumulate.
     """
-    messages = _strip_provider_synthetic_tool_history(
-        _drop_empty_assistant_sentinels([m.model_dump(exclude_none = True) for m in payload.messages])
+    messages = promote_mcp_history_images(
+        _strip_provider_synthetic_tool_history(
+            _drop_empty_assistant_sentinels(
+                [m.model_dump(exclude_none = True) for m in payload.messages]
+            )
+        ),
+        # Verbatim forwarding for a client's own tools: the envelope is dropped
+        # rather than promoted, so a passthrough request never relays base64 as
+        # tool text.
+        vision = False,
     )
 
     if not _legacy_image_is_distinct(payload):
@@ -30212,7 +30191,7 @@ def _openai_messages_for_gguf_chat(payload, is_vision: bool) -> tuple[list[dict]
         }
         _splice_image_into_last_user(messages, image_part)
     has_image = _normalize_anthropic_openai_images(messages, is_vision)
-    return messages, has_image
+    return promote_mcp_history_images(messages, vision = is_vision), has_image
 
 
 async def _openai_messages_for_gguf_chat_async(payload, is_vision: bool) -> tuple[list[dict], bool]:

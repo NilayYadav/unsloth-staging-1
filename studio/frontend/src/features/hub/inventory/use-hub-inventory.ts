@@ -4,7 +4,6 @@
 import {
   type ManagedDownload,
   clearCompletedInventoryHint,
-  downloadInventoryHintKind,
   useDownloadManagerStore,
 } from "@/features/hub/download-manager";
 import { useHfTokenStore } from "@/features/hub/stores/hf-token-store";
@@ -24,7 +23,6 @@ import {
 } from "./inventory-hint-store";
 import {
   type PendingInventoryHints,
-  inventoryHintKey,
   nextInventoryHintExpiryDelay,
   repoKey,
 } from "./inventory-hints";
@@ -41,7 +39,6 @@ import {
 import {
   buildCachedInventoryRow,
   buildLocalInventoryRows,
-  cachedInventoryId,
   defaultCapabilities,
 } from "./view-models";
 import { normalizeTimestamp } from "./inventory-timestamps";
@@ -90,12 +87,7 @@ const LOCAL_DATASET_INVENTORY_SOURCE = [
 
 type LiveInventoryJob = Pick<
   ManagedDownload,
-  | "kind"
-  | "repoId"
-  | "variant"
-  | "inventoryKind"
-  | "state"
-  | "startedAt"
+  "kind" | "repoId" | "variant" | "state" | "startedAt"
 > & {
   displayBytes: number;
 };
@@ -143,16 +135,11 @@ function liveInventoryRank(job: ManagedDownload): number {
   return 0;
 }
 
-export function liveInventorySelectionKey(
-  job: Pick<ManagedDownload, "kind" | "repoId" | "variant" | "inventoryKind">,
-): string {
-  return inventoryHintKey(
-    downloadInventoryHintKind(job.kind, job.variant, job.inventoryKind),
-    job.repoId,
-  );
+function inventoryHintKindForJob(job: ManagedDownload): InventoryHint["kind"] {
+  return job.kind === "dataset" ? "dataset" : job.variant ? "gguf" : "model";
 }
 
-export function observedKeyProtections(
+function observedKeyProtections(
   jobs: Record<string, ManagedDownload>,
 ): Record<InventoryHint["kind"], Set<string>> {
   const keys: Record<InventoryHint["kind"], Set<string>> = {
@@ -169,9 +156,7 @@ export function observedKeyProtections(
     ) {
       continue;
     }
-    keys[
-      downloadInventoryHintKind(job.kind, job.variant, job.inventoryKind)
-    ].add(repoKey(job.repoId));
+    keys[inventoryHintKindForJob(job)].add(repoKey(job.repoId));
   }
   return keys;
 }
@@ -192,7 +177,7 @@ function liveJobDisplayBytes(job: ManagedDownload): number {
   return Math.max(job.downloadedBytes, job.completedBytes, 0);
 }
 
-export function createLiveInventoryJobsSelector(isDatasetMode: boolean): (state: {
+function createLiveInventoryJobsSelector(isDatasetMode: boolean): (state: {
   jobs: Record<string, ManagedDownload>;
 }) => LiveInventoryJob[] {
   let cache: { signature: string; jobs: LiveInventoryJob[] } = {
@@ -200,42 +185,35 @@ export function createLiveInventoryJobsSelector(isDatasetMode: boolean): (state:
     jobs: [],
   };
   return (state) => {
-    const selectedByRepoAndKind = new Map<string, ManagedDownload>();
+    const selectedByRepo = new Map<string, ManagedDownload>();
     for (const job of Object.values(state.jobs)) {
       if (!shouldSurfaceLiveJob(job, isDatasetMode)) continue;
-      if (!repoKey(job.repoId)) continue;
-      const selectionKey = liveInventorySelectionKey(job);
-      const current = selectedByRepoAndKind.get(selectionKey);
+      const repoKey = job.repoId.trim().toLowerCase();
+      if (!repoKey) continue;
+      const current = selectedByRepo.get(repoKey);
       if (
         !current ||
         liveInventoryRank(job) > liveInventoryRank(current) ||
         (liveInventoryRank(job) === liveInventoryRank(current) &&
           job.startedAt > current.startedAt)
       ) {
-        selectedByRepoAndKind.set(selectionKey, job);
+        selectedByRepo.set(repoKey, job);
       }
     }
-    const jobs = [...selectedByRepoAndKind.values()]
+    const jobs = [...selectedByRepo.values()]
       .map((job) => ({
         kind: job.kind,
         repoId: job.repoId,
         variant: job.variant,
-        inventoryKind: job.inventoryKind,
         state: job.state,
         startedAt: job.startedAt,
         displayBytes: liveJobDisplayBytes(job),
       }))
-      .sort(
-        (a, b) =>
-          repoKey(a.repoId).localeCompare(repoKey(b.repoId)) ||
-          liveInventorySelectionKey(a).localeCompare(
-            liveInventorySelectionKey(b),
-          ),
-      );
+      .sort((a, b) => a.repoId.localeCompare(b.repoId));
     const signature = jobs
       .map(
         (job) =>
-          `${job.kind}\u0001${job.repoId.toLowerCase()}\u0001${job.variant ?? ""}\u0001${job.inventoryKind ?? ""}\u0001${job.state}\u0001${job.startedAt}\u0001${job.displayBytes}`,
+          `${job.kind}\u0001${job.repoId.toLowerCase()}\u0001${job.variant ?? ""}\u0001${job.state}\u0001${job.startedAt}\u0001${job.displayBytes}`,
       )
       .join("\u0002");
     if (signature === cache.signature) return cache.jobs;
@@ -249,21 +227,16 @@ function liveDownloadInventoryRows(
   isDatasetMode: boolean,
 ): CachedInventoryRow[] {
   return jobs.map((job) => {
-    const inventoryKind = downloadInventoryHintKind(
-      job.kind,
-      job.variant,
-      job.inventoryKind,
-    );
     const modelFormat = isDatasetMode
       ? "unknown"
-      : inventoryKind === "gguf"
+      : job.variant
         ? "gguf"
         : "safetensors";
     return {
       ...buildCachedInventoryRow(
         {
           repo_id: job.repoId,
-          inventory_id: cachedInventoryId(modelFormat, job.repoId),
+          inventory_id: `cache:${modelFormat}:${job.repoId}`,
           load_id: job.repoId,
           model_format: modelFormat,
           runtime:

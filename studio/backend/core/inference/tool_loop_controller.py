@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Collection, Literal, Mapping, Sequence
 from urllib.parse import urlparse
 
+from core.inference.mcp_images import split_images as split_mcp_images
 from core.inference.tool_call_parser import TOOL_ERROR_NUDGE, TOOL_ERROR_PREFIXES
 
 
@@ -193,10 +194,6 @@ class ToolCallDecision:
     tool_name: str
     arguments: dict[str, Any]
     tool_call_id: str = ""
-    # The id the card carries on screen. For an id-less call that is the
-    # spelling the client minted, not the id the conversation replays;
-    # otherwise the two are the same.
-    card_call_id: str = ""
     key: str = ""
     provenance: dict[str, Any] = field(default_factory = dict)
     status_text: str = ""
@@ -205,11 +202,6 @@ class ToolCallDecision:
     @property
     def should_execute(self) -> bool:
         return self.action == "execute"
-
-    @property
-    def card_id(self) -> str:
-        """The id every frontend-visible event for this call is addressed to."""
-        return self.card_call_id or self.tool_call_id
 
     @property
     def emit_visible_events(self) -> bool:
@@ -244,7 +236,7 @@ class ToolCallDecision:
         arguments = {"raw": fragment} if fragment is not None else self.arguments
         return {
             "tool_name": self.tool_name,
-            "tool_call_id": self.card_id,
+            "tool_call_id": self.tool_call_id,
             "arguments": arguments,
             "provenance": self.provenance,
         }
@@ -294,7 +286,7 @@ class ToolCallCompletion:
         """Build the payload fields for a real tool_end event."""
         return {
             "tool_name": self.decision.tool_name,
-            "tool_call_id": self.decision.card_id,
+            "tool_call_id": self.decision.tool_call_id,
             "result": self.result,
             "provenance": self.decision.provenance,
         }
@@ -331,6 +323,10 @@ class ToolCallCompletion:
         if self.decision.tool_call_id:
             message["tool_call_id"] = self.decision.tool_call_id
         return message
+
+    def mcp_images(self) -> list[dict]:
+        """Images this call returned, for the loops that can show them to the model."""
+        return split_mcp_images(self.result)[1] if self.executed else []
 
 
 @dataclass(frozen = True)
@@ -815,29 +811,6 @@ def is_tool_error(result: str) -> bool:
     return isinstance(result, str) and result.lstrip().startswith(TOOL_ERROR_PREFIXES)
 
 
-def _strip_mcp_image_suffix(result: str) -> str:
-    """Drop a trailing __MCP_IMAGES__ envelope only when it is the valid JSON
-    image array appended by _flatten_result, so legit tool text that merely
-    mentions the marker is not truncated."""
-    head, sep, payload = result.rpartition("\n__MCP_IMAGES__:")
-    if not sep:
-        return result
-    try:
-        images = json.loads(payload)
-    except (ValueError, RecursionError):
-        return result
-    if not isinstance(images, list) or not images:
-        return result
-    if not all(
-        isinstance(img, dict)
-        and isinstance(img.get("data"), str)
-        and isinstance(img.get("mimeType"), str)
-        for img in images
-    ):
-        return result
-    return head.rstrip()
-
-
 def _strip_files_sentinel(result: str) -> str:
     """Drop a trailing ``__FILES__`` envelope, and only that.
 
@@ -884,7 +857,7 @@ def strip_result_for_model(result: str, tool_name: "str | None" = None) -> str:
     if tool_name is None or tool_name == "web_search":
         from .search_images import strip_images_suffix
         result = strip_images_suffix(result)
-    result = _strip_mcp_image_suffix(result)
+    result = split_mcp_images(result)[0]
     if tool_name is None or tool_name in _SANDBOX_TOOLS:
         result = _strip_files_sentinel(result)
     for sentinel in ("__IMAGES__:", "__RAG_SOURCES__:"):
@@ -1042,7 +1015,6 @@ class ToolLoopController:
             tool_name = tool_name,
             arguments = coerced.arguments,
             tool_call_id = str(tool_call.get("id") or ""),
-            card_call_id = str(tool_call.get("card_id") or ""),
             key = key,
             provenance = provenance,
             status_text = status_for_tool(tool_name, coerced.arguments),
