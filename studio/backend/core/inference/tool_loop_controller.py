@@ -528,7 +528,7 @@ def _coerce_declared_value(text: str, declared: str, repair: bool) -> Any:
             return False
     elif declared in ("integer", "number"):
         try:
-            # float() would round 9007199254740993, which an already-numeric argument keeps.
+            # float() would , which an already-numeric argument keeps.
             return int(stripped)
         except ValueError:
             pass
