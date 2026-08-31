@@ -30059,7 +30059,7 @@ def _splice_image_into_last_user(messages: list[dict], image_part: dict) -> None
         messages.append({"role": "user", "content": [image_part]})
 
 
-def _openai_messages_for_passthrough(payload) -> list[dict]:
+def _openai_messages_for_passthrough(payload, vision: bool = False) -> list[dict]:
     """Build OpenAI-format message dicts for the /v1/chat/completions
     passthrough path.
 
@@ -30086,10 +30086,7 @@ def _openai_messages_for_passthrough(payload) -> list[dict]:
                 [m.model_dump(exclude_none = True) for m in payload.messages]
             )
         ),
-        # Verbatim forwarding for a client's own tools: the envelope is dropped
-        # rather than promoted, so a passthrough request never relays base64 as
-        # tool text.
-        vision = False,
+        vision = vision,
     )
 
     if not _legacy_image_is_distinct(payload):
@@ -30235,7 +30232,9 @@ def _build_openai_passthrough_body(
     extensions (``enable_tools``, ``enabled_tools``, ``session_id``, ...) never
     leak to the backend.
     """
-    messages = _openai_messages_for_passthrough(payload)
+    messages = _openai_messages_for_passthrough(
+        payload, vision = bool(getattr(llama_backend, "is_vision", False))
+    )
     system_prompt, _, _ = _extract_content_parts(payload.messages)
     messages = _set_or_prepend_system_message(messages, system_prompt)
     # Markup is broken in _build_passthrough_payload, shared with both /v1/messages (#7066).

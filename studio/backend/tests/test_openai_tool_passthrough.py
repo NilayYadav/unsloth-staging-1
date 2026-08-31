@@ -3697,6 +3697,15 @@ class TestGgufVisionMessages:
 
         assert all("__MCP_IMAGES__" not in str(m.get("content")) for m in messages)
 
+    def test_passthrough_promotes_the_images_for_a_vision_model(self):
+        req = ChatCompletionRequest(model = "default", messages = self._mcp_tool_history())
+
+        messages = _openai_messages_for_passthrough(req, vision = True)
+
+        promoted = messages[3]
+        assert promoted["role"] == "user"
+        assert promoted["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+
     def test_the_native_path_never_templates_the_image_envelope(self):
         req = ChatCompletionRequest(model = "default", messages = self._mcp_tool_history())
 
