@@ -1177,6 +1177,7 @@ class InferenceBackend:
                     presence_penalty = presence_penalty,
                     continue_final_message = continue_final_message,
                     images = images,
+                    tools = tools,
                 )
                 return
             else:
@@ -1322,6 +1323,7 @@ class InferenceBackend:
         presence_penalty: float = 0.0,
         continue_final_message: bool = False,
         images = None,
+        tools: Optional[list] = None,
     ) -> Generator[str, None, None]:
         """Handle vision model generation with true token-by-token streaming."""
         # Reset so a failed or uncountable run cannot surface stale stats.
@@ -1361,7 +1363,10 @@ class InferenceBackend:
             def _render_vision(msgs):
                 # Partial taken from the swept msgs, not the raw pre-sweep capture.
                 return render_prompt_with_boundary(
-                    processor, msgs, continue_final_message = bool(continue_partial)
+                    processor,
+                    msgs,
+                    continue_final_message = bool(continue_partial),
+                    tools = tools,
                 )
 
             def _collapsed_messages():
@@ -1394,15 +1399,25 @@ class InferenceBackend:
             # single-turn shape every loaded processor already renders.
             shapes = []
             if _count_image_markers(messages):
-                shapes.append(_history_vision_messages(messages, system_prompt))
-            shapes.append(_collapsed_messages())
+                history = _history_vision_messages(messages, system_prompt)
+                if image is not None:
+                    # An attachment is marked where it belongs, on the newest user
+                    # turn, so its pixels follow the ones history already marks.
+                    from core.inference.mcp_images import mark_last_user_turn
+
+                    history = mark_last_user_turn(history, 1)
+                    shapes.append((history, list(images or []) + [image]))
+                else:
+                    shapes.append((history, attached))
+            shapes.append((_collapsed_messages(), attached))
 
             input_text = None
             failure = None
-            for shape in shapes:
+            pixels = attached
+            for shape, shape_pixels in shapes:
                 # One marker per image, or the processor counts image tokens it was
                 # given no pixels for and raises out of the tensor build.
-                if _count_image_markers(shape) != len(attached):
+                if _count_image_markers(shape) != len(shape_pixels):
                     continue
                 vision_messages = neutralize_control_markup_in_messages(shape, None, markup)
                 for attempt in (
@@ -1418,6 +1433,7 @@ class InferenceBackend:
                         if not system_prompt:
                             break
                 if input_text is not None:
+                    pixels = shape_pixels
                     break
                 logger.warning(
                     f"Vision processor for '{self.active_model_name}' could not render this "
@@ -1426,7 +1442,7 @@ class InferenceBackend:
             if input_text is None:
                 raise failure
             inputs = processor(
-                attached[0] if len(attached) == 1 else attached,
+                pixels[0] if len(pixels) == 1 else pixels,
                 input_text,
                 add_special_tokens = False,
                 return_tensors = "pt",

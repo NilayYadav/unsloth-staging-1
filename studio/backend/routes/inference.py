@@ -22743,7 +22743,9 @@ async def produce_openai_chat_completions(
         # recomputing here would hide that and drop the client catalog.
         not _sf_tools_on
         and not _sf_use_tools
-        and image is None
+        # Same rule as the server-side gate above: only a model that cannot read
+        # images has to give its tools up for one.
+        and (image is None or bool(_sf_model_info.get("is_vision")))
         and not _sf_is_gptoss
         and _sf_features.get("supports_tools", False)
         and ((payload.tools and len(payload.tools) > 0) or _sf_has_tool_msgs)

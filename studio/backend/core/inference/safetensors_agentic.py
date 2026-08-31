@@ -51,7 +51,7 @@ from core.tool_healing import (
     _think_spans_outside_tool_markup,
     strip_outside_think,
 )
-from core.inference.mcp_images import placeholder_turn, png_payloads
+from core.inference.mcp_images import placeholder_turn, png_payloads, trim_image_turns
 from core.inference.tool_loop_controller import (
     ToolLoopController,
     append_deferred_nudges,
@@ -1451,7 +1451,8 @@ def run_safetensors_tool_loop(
             encoded = png_payloads(batch_mcp_images)
             if encoded:
                 images_sink.extend(encoded)
-                conversation.append(placeholder_turn(len(encoded)))
+                conversation.append(placeholder_turn(len(encoded), len(batch_mcp_images)))
+                trim_image_turns(conversation, images_sink)
 
         # Clear the status badge before the next turn.
         yield {"type": "status", "text": ""}

@@ -17,6 +17,7 @@ SENTINEL = "__MCP_IMAGES__:"
 IMAGE_TURN_TEXT = "Images returned by the tool call above:"
 
 MAX_MODEL_IMAGES = 4
+MAX_TOTAL_MODEL_IMAGES = 8
 MAX_IMAGE_EDGE = 1024
 
 
@@ -91,16 +92,62 @@ def png_payloads(images: Sequence[dict]) -> list[str]:
     return out
 
 
-def placeholder_turn(count: int) -> dict:
+def _turn_text(shown: int, total: int) -> str:
+    # The tool result's own note counts every image it returned, so a turn that
+    # carries fewer has to say so rather than let the model wait for the rest.
+    if total > shown:
+        return f"{IMAGE_TURN_TEXT} (first {shown} of {total})"
+    return IMAGE_TURN_TEXT
+
+
+def placeholder_turn(count: int, total: "int | None" = None) -> dict:
     """The user turn a local processor renders: ``{"type": "image"}`` markers the
     template turns into image tokens, with the pixels passed alongside."""
     return {
         "role": "user",
         "content": [
             *({"type": "image"} for _ in range(count)),
-            {"type": "text", "text": IMAGE_TURN_TEXT},
+            {"type": "text", "text": _turn_text(count, count if total is None else total)},
         ],
     }
+
+
+def trim_image_turns(
+    conversation: list, payloads: list, limit: int = MAX_TOTAL_MODEL_IMAGES
+) -> None:
+    """Keep the newest *limit* pictures. A loop that keeps calling an image tool
+    otherwise re-sends every one it has ever seen, and the oldest markers have to
+    go with their own pixels or the processor counts image tokens it was given
+    none for."""
+    excess = len(payloads) - limit
+    if excess <= 0:
+        return
+    del payloads[:excess]
+    drained = []
+    for index, message in enumerate(conversation):
+        if excess <= 0:
+            break
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        kept = []
+        for part in content:
+            if excess > 0 and isinstance(part, dict) and part.get("type") == "image":
+                excess -= 1
+                continue
+            kept.append(part)
+        if len(kept) == len(content):
+            continue
+        if (
+            len(kept) == 1
+            and kept[0].get("type") == "text"
+            and str(kept[0].get("text", "")).startswith(IMAGE_TURN_TEXT)
+        ):
+            drained.append(index)
+        else:
+            conversation[index] = {**message, "content": kept}
+    for index in reversed(drained):
+        del conversation[index]
 
 
 def append_image_turn(conversation: list, images: Sequence[dict]) -> None:
@@ -118,7 +165,13 @@ def append_image_turn(conversation: list, images: Sequence[dict]) -> None:
         conversation[-1] = {**last, "content": [{"type": "text", "text": last["content"]}, *parts]}
         return
     conversation.append(
-        {"role": "user", "content": [{"type": "text", "text": IMAGE_TURN_TEXT}, *parts]}
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _turn_text(len(parts), len(images))},
+                *parts,
+            ],
+        }
     )
 
 
@@ -158,13 +211,14 @@ def _promote(messages, vision: bool, *, local: bool) -> tuple[list[dict], list[s
             return into
         if local:
             encoded = png_payloads(pending)
+            returned = len(pending)
             pending.clear()
             if not encoded:
                 return into
             payloads.extend(encoded)
             markers = [{"type": "image"} for _ in encoded]
             if into is None:
-                out.append(placeholder_turn(len(encoded)))
+                out.append(placeholder_turn(len(encoded), returned))
                 return None
             return _with_parts(into, markers)
         images = list(pending)
