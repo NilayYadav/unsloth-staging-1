@@ -3034,6 +3034,7 @@ from core.inference.llama_http import nonstreaming_client
 from core.inference.mcp_images import (
     has_images as mcp_images_sentinel_in,
     promote_history as promote_mcp_history_images,
+    promote_history_local as promote_mcp_history_images_local,
     split_images as split_mcp_images,
 )
 from core.inference.tool_call_parser import (
@@ -17736,7 +17737,9 @@ def _inject_audio_part(messages: list[dict], audio_b64: str, audio_format: str) 
             return
 
 
-def _extract_content_parts(messages: list) -> tuple[str, list[dict], "Optional[str]"]:
+def _extract_content_parts(
+    messages: list, *, keep_tool_images: bool = False
+) -> tuple[str, list[dict], "Optional[str]"]:
     """
     Parse OpenAI-format messages into components the inference backend expects.
 
@@ -17806,7 +17809,7 @@ def _extract_content_parts(messages: list) -> tuple[str, list[dict], "Optional[s
 
         if combined_text is None:
             continue
-        if msg.role == "tool":
+        if msg.role == "tool" and not keep_tool_images:
             combined_text = split_mcp_images(combined_text)[0]
         chat_message = {"role": msg.role, "content": combined_text}
         if msg.role == "assistant" and msg.reasoning_content:
@@ -19555,7 +19558,7 @@ async def produce_openai_chat_completions(
     _preprepared_audio = None
     _image_preflight = None
     if _should_validate_before_switch():
-        _pre_parsed = _extract_content_parts(payload.messages)
+        _pre_parsed = _extract_content_parts(payload.messages, keep_tool_images = True)
         if not _pre_parsed[1]:
             raise HTTPException(
                 status_code = 400, detail = "At least one non-system message is required."
@@ -20327,7 +20330,9 @@ async def produce_openai_chat_completions(
     if _pre_parsed is not None:
         system_prompt, chat_messages, extracted_image_b64 = _pre_parsed
     else:
-        system_prompt, chat_messages, extracted_image_b64 = _extract_content_parts(payload.messages)
+        system_prompt, chat_messages, extracted_image_b64 = _extract_content_parts(
+            payload.messages, keep_tool_images = True
+        )
     # applied once so both backends inherit it, with or without tools, and never state it twice.
     system_prompt = _apply_current_date_prompt(system_prompt, request)
 
@@ -22076,6 +22081,11 @@ async def produce_openai_chat_completions(
 
     # Classify capability flags from the loaded template.
     _sf_model_info = backend.models.get(backend.active_model_name, {})
+    # Strips for a text-only model, rebuilds the picture as a marker turn for one
+    # that reads images; either way no envelope reaches the template.
+    chat_messages, sf_mcp_images = promote_mcp_history_images_local(
+        chat_messages, vision = bool(_sf_model_info.get("is_vision"))
+    )
     _sf_tpl = (_sf_model_info.get("chat_template_info") or {}).get("template")
     # Resolve the tool policy BEFORE the protocol is classified: the template
     # branch chosen here must be the one generation renders. Reading the raw
@@ -22297,6 +22307,7 @@ async def produce_openai_chat_completions(
                 messages = _sf_chat_messages,
                 tools = _sf_tools_to_use,
                 system_prompt = _sf_system_prompt or "",
+                images = sf_mcp_images or None,
                 temperature = payload.temperature,
                 top_p = payload.top_p,
                 top_k = payload.top_k,
@@ -22685,6 +22696,7 @@ async def produce_openai_chat_completions(
         messages = chat_messages,
         system_prompt = system_prompt,
         image = image,
+        images = sf_mcp_images or None,
         temperature = payload.temperature,
         top_p = payload.top_p,
         top_k = payload.top_k,

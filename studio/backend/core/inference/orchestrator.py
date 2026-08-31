@@ -973,6 +973,7 @@ class InferenceOrchestrator:
         request_id: str,
         image_b64: Optional[str],
         *,
+        images_b64: Optional[list] = None,
         messages: list = None,
         system_prompt: str = "",
         temperature: float = 0.7,
@@ -1000,6 +1001,7 @@ class InferenceOrchestrator:
             "messages": messages or [],
             "system_prompt": system_prompt,
             "image_base64": image_b64,
+            "images_base64": images_b64 or None,
             "temperature": temperature,
             "top_p": top_p,
             "top_k": top_k,
@@ -2026,6 +2028,7 @@ class InferenceOrchestrator:
         messages: list,
         system_prompt: str = "",
         image = None,
+        images: Optional[list] = None,
         temperature: float = 0.7,
         top_p: float = 0.9,
         top_k: int = 40,
@@ -2061,6 +2064,7 @@ class InferenceOrchestrator:
             messages = messages,
             system_prompt = system_prompt,
             image = image,
+            images = images,
             temperature = temperature,
             top_p = top_p,
             top_k = top_k,
@@ -2087,6 +2091,7 @@ class InferenceOrchestrator:
         messages: list,
         tools: list,
         system_prompt: str = "",
+        images: Optional[list] = None,
         temperature: float = 0.7,
         top_p: float = 0.9,
         top_k: int = 40,
@@ -2128,6 +2133,13 @@ class InferenceOrchestrator:
         from core.inference.tools import execute_tool
 
         max_new_tokens = max_tokens if max_tokens and max_tokens > 0 else 2048
+        # Only a model that reads images gets a sink; the loop leaves MCP pictures
+        # out of the prompt without one.
+        loop_images: Optional[list] = (
+            list(images or [])
+            if self.models.get(self.active_model_name, {}).get("is_vision")
+            else None
+        )
 
         def _single_turn(conv: list, *, active_tools: Optional[list[dict]] = None):
             # ``conv`` already carries any system message. ``active_tools`` lets
@@ -2139,6 +2151,7 @@ class InferenceOrchestrator:
                 messages = conv,
                 system_prompt = "",
                 image = None,
+                images = list(loop_images) if loop_images else None,
                 temperature = temperature,
                 top_p = top_p,
                 top_k = top_k,
@@ -2238,6 +2251,7 @@ class InferenceOrchestrator:
             # So a conversation search can be sized against what this model can hold.
             context_length = _model_info.get("context_length"),
             max_tokens = max_new_tokens,
+            images_sink = loop_images,
         )
 
     def generate_with_adapter_control(
@@ -2278,6 +2292,7 @@ class InferenceOrchestrator:
         messages: list = None,
         system_prompt: str = "",
         image = None,
+        images: Optional[list] = None,
         temperature: float = 0.7,
         top_p: float = 0.9,
         top_k: int = 40,
@@ -2337,6 +2352,7 @@ class InferenceOrchestrator:
             cmd = self._build_generate_cmd(
                 request_id,
                 image_b64,
+                images_b64 = images,
                 messages = messages,
                 system_prompt = system_prompt,
                 temperature = temperature,

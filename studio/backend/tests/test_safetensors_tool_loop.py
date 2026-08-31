@@ -1740,9 +1740,9 @@ class TestParserCrossFormatRouting:
         for label, text, expected_name in cases:
             result = parse_tool_calls_from_text(text)
             assert len(result) == 1, f"{label}: parser missed the call"
-            assert (
-                result[0]["function"]["name"] == expected_name
-            ), f"{label}: got {result[0]['function']['name']!r}, expected {expected_name!r}"
+            assert result[0]["function"]["name"] == expected_name, (
+                f"{label}: got {result[0]['function']['name']!r}, expected {expected_name!r}"
+            )
 
     def test_all_new_markers_in_tool_xml_signals(self):
         # The safetensors / MLX streaming buffer must wake on every supported emission marker --
@@ -3594,9 +3594,9 @@ class TestGGUFSafetensorsHealingParity:
         from core.inference.llama_cpp import LlamaCppBackend
 
         src = inspect.getsource(LlamaCppBackend.generate_chat_completion_with_tools)
-        assert (
-            "_shared_strip_tool_markup" in src
-        ), "GGUF stream cleanup must delegate to the shared strip_tool_markup helper"
+        assert "_shared_strip_tool_markup" in src, (
+            "GGUF stream cleanup must delegate to the shared strip_tool_markup helper"
+        )
 
     def test_gguf_uses_canonical_heal_keys(self):
         # GGUF and safetensors heal a bare-string ``arguments`` to the same
@@ -3882,9 +3882,9 @@ class TestProseMentioningToolCall:
         contents = [e for e in events if e["type"] == "content"]
         assert contents, "expected at least one content event"
         final = contents[-1]["text"]
-        assert (
-            "LLM tool" in final
-        ), f"prose mentioning <tool_call> should not be truncated; got {final!r}"
+        assert "LLM tool" in final, (
+            f"prose mentioning <tool_call> should not be truncated; got {final!r}"
+        )
 
     def test_tool_result_with_tool_call_text_does_not_retrigger(self):
         # A literal ``<tool_call>`` in the tool result must not re-trigger: the
@@ -5320,6 +5320,83 @@ class TestStreamingDisplayStripStillMatchesTheExportedHelper:
         for i in range(1, len(text) + 1):
             prefix = text[:i]
             incremental = stripper.strip(safetensors_agentic._strip_mistral_reasoning(prefix))
-            assert incremental == strip_tool_markup_streaming(
-                prefix, enabled_tool_names = names
-            ), f"diverged at offset {i}"
+            assert incremental == strip_tool_markup_streaming(prefix, enabled_tool_names = names), (
+                f"diverged at offset {i}"
+            )
+
+
+def test_mcp_images_reach_a_vision_model_through_the_sink(monkeypatch):
+    import base64
+    import io
+    import json
+
+    from PIL import Image
+
+    from core.inference import mcp_images
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (6, 6), (10, 120, 200)).save(buffer, format = "PNG")
+    envelope = json.dumps(
+        [{"data": base64.b64encode(buffer.getvalue()).decode(), "mimeType": "image/png"}]
+    )
+    result = "[1 image returned]\n" + mcp_images.SENTINEL + envelope
+
+    turns = [
+        '<tool_call>{"name": "mcp__fs__read_media_file", "arguments": {}}</tool_call>',
+        "A tabby cat.",
+    ]
+    seen: list[list] = []
+
+    def single_turn(conversation, *, active_tools = None):
+        seen.append([dict(message) for message in conversation])
+        yield turns[len(seen) - 1]
+
+    sink: list = []
+    list(
+        run_safetensors_tool_loop(
+            single_turn = single_turn,
+            messages = [{"role": "user", "content": "describe the image"}],
+            tools = [{"type": "function", "function": {"name": "mcp__fs__read_media_file"}}],
+            execute_tool = lambda name, args, **kwargs: result,
+            max_tool_iterations = 2,
+            images_sink = sink,
+        )
+    )
+
+    assert len(sink) == 1
+    assert base64.b64decode(sink[0])[:8] == b"\x89PNG\r\n\x1a\n"
+    second_turn = seen[1]
+    assert "__MCP_IMAGES__" not in json.dumps(second_turn)
+    assert second_turn[-1]["role"] == "user"
+    assert second_turn[-1]["content"][0] == {"type": "image"}
+
+
+def test_mcp_images_are_left_out_without_a_sink(monkeypatch):
+    import json
+
+    from core.inference import mcp_images
+
+    envelope = json.dumps([{"data": "QUJD", "mimeType": "image/png"}])
+    result = "[1 image returned]\n" + mcp_images.SENTINEL + envelope
+    turns = [
+        '<tool_call>{"name": "mcp__fs__read_media_file", "arguments": {}}</tool_call>',
+        "A tabby cat.",
+    ]
+    seen: list[list] = []
+
+    def single_turn(conversation, *, active_tools = None):
+        seen.append([dict(message) for message in conversation])
+        yield turns[len(seen) - 1]
+
+    list(
+        run_safetensors_tool_loop(
+            single_turn = single_turn,
+            messages = [{"role": "user", "content": "describe the image"}],
+            tools = [{"type": "function", "function": {"name": "mcp__fs__read_media_file"}}],
+            execute_tool = lambda name, args, **kwargs: result,
+            max_tool_iterations = 2,
+        )
+    )
+
+    assert seen[1][-1]["role"] == "tool"
+    assert "__MCP_IMAGES__" not in json.dumps(seen[1])

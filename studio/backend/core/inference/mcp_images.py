@@ -80,6 +80,29 @@ def _png_data_url(data: str) -> str | None:
     return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def png_payloads(images: Sequence[dict]) -> list[str]:
+    """Normalized PNG base64, for backends that take images as objects rather
+    than as data URLs inside the prompt."""
+    out = []
+    for image in images[:MAX_MODEL_IMAGES]:
+        url = _png_data_url(image.get("data", ""))
+        if url:
+            out.append(url.split(",", 1)[1])
+    return out
+
+
+def placeholder_turn(count: int) -> dict:
+    """The user turn a local processor renders: ``{"type": "image"}`` markers the
+    template turns into image tokens, with the pixels passed alongside."""
+    return {
+        "role": "user",
+        "content": [
+            *({"type": "image"} for _ in range(count)),
+            {"type": "text", "text": IMAGE_TURN_TEXT},
+        ],
+    }
+
+
 def append_image_turn(conversation: list, images: Sequence[dict]) -> None:
     """A user turn, not the ``role=tool`` result they came with: tool messages take
     no image parts, and local templates render tool content as a string."""
@@ -102,8 +125,45 @@ def append_image_turn(conversation: list, images: Sequence[dict]) -> None:
 def promote_history(messages: Sequence[dict], *, vision: bool) -> list[dict]:
     """Rebuild image turns from replayed envelopes. The envelope leaves the tool
     text either way: a text-only model must not be shown its base64."""
+    return _promote(messages, vision, local = False)[0]
+
+
+def promote_history_local(
+    messages: Sequence[dict], *, vision: bool
+) -> tuple[list[dict], list[str]]:
+    """The same, for backends that take the pixels beside the prompt: the turns
+    carry markers and the payloads come back with them."""
+    return _promote(messages, vision, local = True)
+
+
+def _promote(messages, vision: bool, *, local: bool) -> tuple[list[dict], list[str]]:
     out: list[dict] = []
     pending: list[dict] = []
+    payloads: list[str] = []
+
+    def flush(into: "dict | None" = None) -> "dict | None":
+        if not pending or not vision:
+            pending.clear()
+            return into
+        if local:
+            encoded = png_payloads(pending)
+            pending.clear()
+            if not encoded:
+                return into
+            payloads.extend(encoded)
+            markers = [{"type": "image"} for _ in encoded]
+            if into is None:
+                out.append(placeholder_turn(len(encoded)))
+                return None
+            return _with_parts(into, markers)
+        images = list(pending)
+        pending.clear()
+        if into is None:
+            append_image_turn(out, images)
+            return None
+        parts = content_parts(images)
+        return _with_parts(into, parts) if parts else into
+
     for message in messages:
         content = message.get("content")
         if message.get("role") == "tool" and isinstance(content, str):
@@ -114,25 +174,15 @@ def promote_history(messages: Sequence[dict], *, vision: bool) -> list[dict]:
         if pending and vision and message.get("role") == "user":
             # Merged, not inserted ahead of it: two user turns in a row is what
             # a strict template rejects.
-            out.append(_with_image_parts(message, pending))
-            pending.clear()
+            out.append(flush(message))
             continue
-        _flush(out, pending, vision)
+        flush()
         out.append(message)
-    _flush(out, pending, vision)
-    return out
+    flush()
+    return out, payloads
 
 
-def _with_image_parts(message: dict, images: Sequence[dict]) -> dict:
-    parts = content_parts(images)
-    if not parts:
-        return message
+def _with_parts(message: dict, parts: list[dict]) -> dict:
     content = message.get("content")
     own = list(content) if isinstance(content, list) else [{"type": "text", "text": content or ""}]
     return {**message, "content": [*parts, *own]}
-
-
-def _flush(conversation: list, pending: list[dict], vision: bool) -> None:
-    if pending and vision:
-        append_image_turn(conversation, pending)
-    pending.clear()

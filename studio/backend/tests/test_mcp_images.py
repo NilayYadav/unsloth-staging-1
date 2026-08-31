@@ -195,3 +195,49 @@ def test_history_merges_into_a_following_user_turn():
     assert [message["role"] for message in messages] == ["tool", "user"]
     assert messages[1]["content"][0]["type"] == "image_url"
     assert messages[1]["content"][1] == {"type": "text", "text": "what colour was it"}
+
+
+def test_local_history_carries_markers_and_payloads():
+    messages, payloads = mcp_images.promote_history_local(
+        [
+            {"role": "user", "content": "what is in the file"},
+            {"role": "tool", "content": _envelope("[1 image returned]", _image())},
+            {"role": "assistant", "content": "a blue square"},
+        ],
+        vision = True,
+    )
+
+    assert messages[2]["role"] == "user"
+    assert messages[2]["content"][0] == {"type": "image"}
+    assert len(payloads) == 1
+    assert base64.b64decode(payloads[0])[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_local_history_merges_markers_into_a_following_user_turn():
+    messages, payloads = mcp_images.promote_history_local(
+        [
+            {"role": "tool", "content": _envelope("[1 image returned]", _image())},
+            {"role": "user", "content": "what colour was it"},
+        ],
+        vision = True,
+    )
+
+    assert [message["role"] for message in messages] == ["tool", "user"]
+    assert messages[1]["content"][0] == {"type": "image"}
+    assert len(payloads) == 1
+
+
+def test_local_history_strips_without_vision():
+    messages, payloads = mcp_images.promote_history_local(
+        [{"role": "tool", "content": _envelope("[1 image returned]", _image())}],
+        vision = False,
+    )
+
+    assert messages == [{"role": "tool", "content": "[1 image returned]"}]
+    assert payloads == []
+
+
+def test_placeholder_turn_marks_one_image_per_payload():
+    turn = mcp_images.placeholder_turn(2)
+
+    assert [part["type"] for part in turn["content"]] == ["image", "image", "text"]

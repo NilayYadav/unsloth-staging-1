@@ -51,6 +51,7 @@ from core.tool_healing import (
     _think_spans_outside_tool_markup,
     strip_outside_think,
 )
+from core.inference.mcp_images import placeholder_turn, png_payloads
 from core.inference.tool_loop_controller import (
     ToolLoopController,
     append_deferred_nudges,
@@ -493,6 +494,7 @@ def run_safetensors_tool_loop(
     renderable_tools = None,
     context_length: Optional[int] = None,
     max_tokens: Optional[int] = None,
+    images_sink: Optional[list] = None,
 ) -> Generator[dict, None, None]:
     """Drive an agentic tool loop on top of a cumulative-text generator.
 
@@ -1179,6 +1181,7 @@ def run_safetensors_tool_loop(
         # Collect no-op nudges and flush them after the batch, so a no-op doesn't
         # abort it and drop the parallel calls that follow.
         deferred_noop_msgs: list = []
+        batch_mcp_images: list = []
 
         for _call_index, tc in enumerate(tool_calls or []):
             func = tc.get("function", {}) or {}
@@ -1439,8 +1442,16 @@ def run_safetensors_tool_loop(
             _turn_executed_real_tool = True
             yield completion.tool_end_event()
             conversation.append(completion.tool_message())
+            batch_mcp_images.extend(completion.mcp_images())
 
         append_deferred_nudges(conversation, deferred_noop_msgs)
+        if batch_mcp_images and images_sink is not None:
+            # A sink only when the loaded model reads images; the pixels ride
+            # beside the prompt, so the turn carries markers rather than data.
+            encoded = png_payloads(batch_mcp_images)
+            if encoded:
+                images_sink.extend(encoded)
+                conversation.append(placeholder_turn(len(encoded)))
 
         # Clear the status badge before the next turn.
         yield {"type": "status", "text": ""}

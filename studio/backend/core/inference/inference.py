@@ -250,6 +250,31 @@ class _GenerationThreadError(RuntimeError):
     """Generation worker failures that should propagate through stream routes."""
 
 
+def _count_image_markers(messages) -> int:
+    return sum(
+        1
+        for message in messages
+        if isinstance(message.get("content"), list)
+        for part in message["content"]
+        if isinstance(part, dict) and part.get("type") in ("image", "image_url", "input_image")
+    )
+
+
+def _history_vision_messages(messages, system_prompt: str) -> list[dict]:
+    """The whole conversation in the part shape a processor template renders."""
+    out = []
+    if system_prompt:
+        out.append({"role": "system", "content": [{"type": "text", "text": system_prompt}]})
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            parts = list(content)
+        else:
+            parts = [{"type": "text", "text": content or ""}]
+        out.append({**message, "content": parts})
+    return out
+
+
 class InferenceBackend:
     """Unified inference backend supporting text, vision, and LoRA models"""
 
@@ -1049,6 +1074,7 @@ class InferenceBackend:
         messages: list,
         system_prompt: str,
         image = None,
+        images: Optional[list] = None,
         temperature: float = 0.7,
         top_p: float = 0.9,
         top_k: int = 40,
@@ -1074,6 +1100,7 @@ class InferenceBackend:
             messages = messages,
             system_prompt = system_prompt,
             image = image,
+            images = images,
             temperature = temperature,
             top_p = top_p,
             top_k = top_k,
@@ -1094,6 +1121,7 @@ class InferenceBackend:
         messages: list,
         system_prompt: str = "",
         image = None,
+        images: Optional[list] = None,
         temperature: float = 0.7,
         top_p: float = 0.9,
         top_k: int = 40,
@@ -1125,7 +1153,7 @@ class InferenceBackend:
         tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
         top_k = self._normalize_top_k(top_k)
 
-        if is_vision and image:
+        if is_vision and (image or images):
             # Verify the stored processor can handle images; FastVisionModel may
             # return a raw tokenizer instead of a ProcessorMixin (e.g. Gemma-3).
             from transformers import ProcessorMixin
@@ -1148,6 +1176,7 @@ class InferenceBackend:
                     cancel_event = cancel_event,
                     presence_penalty = presence_penalty,
                     continue_final_message = continue_final_message,
+                    images = images,
                 )
                 return
             else:
@@ -1292,6 +1321,7 @@ class InferenceBackend:
         cancel_event = None,
         presence_penalty: float = 0.0,
         continue_final_message: bool = False,
+        images = None,
     ) -> Generator[str, None, None]:
         """Handle vision model generation with true token-by-token streaming."""
         # Reset so a failed or uncountable run cannot surface stale stats.
@@ -1312,50 +1342,21 @@ class InferenceBackend:
             trailing_assistant_text,
         )
 
+        attached = ([image] if image is not None else []) + list(images or [])
         user_message = last_user_text(messages)
         continue_partial = trailing_assistant_text(messages) if continue_final_message else None
 
         if not user_message:
-            user_message = "Describe this image." if image else "Hello"
+            user_message = "Describe this image." if attached else "Hello"
 
         # Prepare vision messages
-        if image:
-            user_msg = {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": user_message},
-                ],
-            }
-            if system_prompt:
-                vision_messages = [
-                    {
-                        "role": "system",
-                        "content": [{"type": "text", "text": system_prompt}],
-                    },
-                    user_msg,
-                ]
-            else:
-                vision_messages = [user_msg]
-
-            # Resume the partial answer instead of opening a new turn.
-            if continue_partial:
-                vision_messages.append(
-                    {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": continue_partial}],
-                    }
-                )
-
-            # Processor's own template skips the choke point (#7066). Rebind user_msg
-            # so the no-system retry keeps the copy. Profiled from the processor, so a
-            # vision request is gated on the loaded model exactly as the text path is.
+        if attached:
+            # Processor's own template skips the choke point (#7066). Profiled from
+            # the processor, so a vision request is gated on the loaded model
+            # exactly as the text path is.
             from core.inference.chat_template_helpers import markup_for_tokenizer
 
-            vision_messages = neutralize_control_markup_in_messages(
-                vision_messages, None, markup_for_tokenizer(processor)
-            )
-            user_msg = next(m for m in reversed(vision_messages) if m.get("role") == "user")
+            markup = markup_for_tokenizer(processor)
 
             def _render_vision(msgs):
                 # Partial taken from the swept msgs, not the raw pre-sweep capture.
@@ -1363,20 +1364,69 @@ class InferenceBackend:
                     processor, msgs, continue_final_message = bool(continue_partial)
                 )
 
-            try:
-                input_text = _render_vision(vision_messages)
-            except Exception as e:
-                if system_prompt:
-                    logger.warning(
-                        f"Vision processor for '{self.active_model_name}' may not support "
-                        f"system messages; retrying without. Original error: {e}"
+            def _collapsed_messages():
+                turn = {
+                    "role": "user",
+                    "content": [
+                        *({"type": "image"} for _ in attached),
+                        {"type": "text", "text": user_message},
+                    ],
+                }
+                built = (
+                    [{"role": "system", "content": [{"type": "text", "text": system_prompt}]}]
+                    if system_prompt
+                    else []
+                )
+                built.append(turn)
+                if continue_partial:
+                    # Resume the partial answer instead of opening a new turn.
+                    built.append(
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": continue_partial}],
+                        }
                     )
-                    vision_messages = [m for m in vision_messages if m.get("role") != "system"]
-                    input_text = _render_vision(vision_messages)
-                else:
-                    raise
+                return built
+
+            # A conversation that marks its own images (a tool result's pictures)
+            # is rendered whole: collapsing it to the last user turn would drop
+            # the tool exchange the answer depends on. Anything else keeps the
+            # single-turn shape every loaded processor already renders.
+            shapes = []
+            if _count_image_markers(messages):
+                shapes.append(_history_vision_messages(messages, system_prompt))
+            shapes.append(_collapsed_messages())
+
+            input_text = None
+            failure = None
+            for shape in shapes:
+                # One marker per image, or the processor counts image tokens it was
+                # given no pixels for and raises out of the tensor build.
+                if _count_image_markers(shape) != len(attached):
+                    continue
+                vision_messages = neutralize_control_markup_in_messages(shape, None, markup)
+                for attempt in (
+                    vision_messages,
+                    [m for m in vision_messages if m.get("role") != "system"],
+                ):
+                    try:
+                        input_text = _render_vision(attempt)
+                        vision_messages = attempt
+                        break
+                    except Exception as e:
+                        failure = e
+                        if not system_prompt:
+                            break
+                if input_text is not None:
+                    break
+                logger.warning(
+                    f"Vision processor for '{self.active_model_name}' could not render this "
+                    f"conversation; falling back. Original error: {failure}"
+                )
+            if input_text is None:
+                raise failure
             inputs = processor(
-                image,
+                attached[0] if len(attached) == 1 else attached,
                 input_text,
                 add_special_tokens = False,
                 return_tensors = "pt",
