@@ -122,6 +122,17 @@ def append_image_turn(conversation: list, images: Sequence[dict]) -> None:
     )
 
 
+def mark_last_user_turn(messages: Sequence[dict], count: int) -> list[dict]:
+    """Mark the newest user turn as carrying ``count`` images, where an
+    attachment belongs."""
+    out = list(messages)
+    for index in range(len(out) - 1, -1, -1):
+        if out[index].get("role") == "user":
+            out[index] = _with_parts(out[index], [{"type": "image"} for _ in range(count)])
+            break
+    return out
+
+
 def promote_history(messages: Sequence[dict], *, vision: bool) -> list[dict]:
     """Rebuild image turns from replayed envelopes. The envelope leaves the tool
     text either way: a text-only model must not be shown its base64."""

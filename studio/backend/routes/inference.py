@@ -3033,6 +3033,7 @@ from core.inference.api_monitor import api_monitor
 from core.inference.llama_http import nonstreaming_client
 from core.inference.mcp_images import (
     has_images as mcp_images_sentinel_in,
+    mark_last_user_turn as mark_mcp_image_turn,
     promote_history as promote_mcp_history_images,
     promote_history_local as promote_mcp_history_images_local,
     split_images as split_mcp_images,
@@ -22203,7 +22204,9 @@ async def produce_openai_chat_completions(
     _sf_use_tools = (
         (_sf_tools_on or _sf_mcp_allowed)
         and _sf_features.get("supports_tools", False)
-        and image is None
+        # An attachment used to withdraw the tools: the loop had no way to carry
+        # a picture. It has one now, so only a model that cannot read images does.
+        and (image is None or bool(_sf_model_info.get("is_vision")))
         and not _sf_is_gptoss
         and _sf_tool_budget > 0
     )
@@ -22299,6 +22302,13 @@ async def produce_openai_chat_completions(
             else:
                 _sf_chat_messages.append(_msg)
 
+        # The attachment rides in last, matching where its marker sits: the MCP
+        # pictures came from earlier turns.
+        _sf_loop_images = list(sf_mcp_images)
+        if image is not None:
+            _sf_chat_messages = mark_mcp_image_turn(_sf_chat_messages, 1)
+            _sf_loop_images.append(_pil_to_png_b64(image))
+
         # Request-scoped usage/timings receptacle (filled at gen_done).
         _sf_stats_holder: dict = {}
 
@@ -22307,7 +22317,7 @@ async def produce_openai_chat_completions(
                 messages = _sf_chat_messages,
                 tools = _sf_tools_to_use,
                 system_prompt = _sf_system_prompt or "",
-                images = sf_mcp_images or None,
+                images = _sf_loop_images or None,
                 temperature = payload.temperature,
                 top_p = payload.top_p,
                 top_k = payload.top_k,
@@ -27027,6 +27037,12 @@ def _select_anthropic_server_tools(
         selected_names.update(enabled_tools)
 
     return [tool for tool in all_tools if tool["function"]["name"] in selected_names]
+
+
+def _pil_to_png_b64(img) -> str:
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format = "PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def _image_bytes_to_png_b64(raw: bytes) -> str:
