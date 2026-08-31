@@ -338,7 +338,7 @@ test("pacing cannot change a reasoning duration", () => {
   // interpretation over a set of arrivals, publish on every one, then publish
   // on only the last, and require identical durations. Under the old placement
   // each of these cases measured differently depending on which arrivals the
-  // gate let through, and each one cost a .
+  // gate let through, and each one cost a regression.
   const hasUnclosed = (text: string) =>
     text.lastIndexOf("<think>") > text.lastIndexOf("</think>");
 

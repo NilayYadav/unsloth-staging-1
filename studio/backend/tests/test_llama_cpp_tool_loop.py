@@ -906,7 +906,8 @@ def test_reasoning_before_bare_json_tool_closes_think_block(monkeypatch):
 
 def test_structured_tool_call_turn_replays_pre_tool_reasoning_in_next_payload(monkeypatch):
     """llama-server sends reasoning in delta.reasoning_content, so content
- alone drops it, meaning history must carry it or can't see it."""
+    alone drops it, meaning history must carry it or the next turn cannot
+    see it."""
     tool_stream = [
         _sse({"reasoning_content": "I should search "}),
         _sse({"reasoning_content": "for the weather."}),
