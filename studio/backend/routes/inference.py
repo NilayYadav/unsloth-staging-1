@@ -7098,8 +7098,7 @@ def _request_has_image(payload) -> bool:
         return True
     if _messages_have_image(payload.messages):
         return True
-    # A replayed MCP envelope is decoded and re-encoded like any other image, so
-    # it belongs off the event loop for the same reason.
+    # A replayed envelope is decoded and re-encoded like any other image.
     return any(
         message.role == "tool"
         and isinstance(message.content, str)

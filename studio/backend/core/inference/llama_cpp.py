@@ -29682,8 +29682,6 @@ class LlamaCppBackend:
                 # Which tools those no-ops were about, so the flush below can tell
                 # whether the trailing result belongs to the same tool.
                 deferred_noop_tools: set = set()
-                # Images MCP tools returned this batch, shown to the model as one
-                # user turn once the whole batch has been appended.
                 batch_mcp_images: list = []
 
                 # The text-path provisional card uses the parser's default id ("call_0");

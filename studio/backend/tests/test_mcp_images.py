@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-"""Routing MCP image results into the next model turn."""
-
 from __future__ import annotations
 
 import base64
@@ -145,7 +143,6 @@ def test_history_promotes_a_replayed_envelope():
 
 
 def test_history_flushes_after_the_whole_batch_of_tool_results():
-    """A user turn between an assistant's parallel results is rejected upstream."""
     messages = promote_history(
         [
             {"role": "assistant", "content": "", "tool_calls": [{"id": "a"}, {"id": "b"}]},
@@ -187,7 +184,6 @@ def test_history_leaves_other_messages_untouched():
 
 
 def test_history_merges_into_a_following_user_turn():
-    """A turn cancelled mid-tool leaves the results as the newest history."""
     messages = promote_history(
         [
             {"role": "tool", "content": _envelope("[1 image returned]", _image())},

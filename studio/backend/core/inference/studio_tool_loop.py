@@ -335,8 +335,6 @@ class ToolLoopRun:
     model: str | None = None
     tool_choice: Any = None
     continue_final_message: bool = False
-    # Whether the provider's model takes image input, so an MCP tool's picture is
-    # only routed to a model that can read it.
     supports_vision: bool = False
 
 

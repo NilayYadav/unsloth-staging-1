@@ -42,7 +42,5 @@ test("an unparseable envelope is left whole", () => {
 });
 
 test("replaying a tool result re-attaches its images for the backend", () => {
-  // The images are dropped from the card's wrapper on replay, so without this
-  // the model can never be asked about a picture from an earlier turn.
   assert.match(adapter, /content \+= mcpImagesEnvelope\(result\.images\);/);
 });

@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-# Images an MCP tool returned, routed into the next model turn. _flatten_result
-# appends them to the tool result as a frontend-only envelope; the tool text the
-# model reads never carries base64, so the picture reaches a vision model as its
-# own user turn instead.
-
 from __future__ import annotations
 
 import base64
@@ -21,18 +16,12 @@ logger = get_logger(__name__)
 SENTINEL = "__MCP_IMAGES__:"
 IMAGE_TURN_TEXT = "Images returned by the tool call above:"
 
-# A tool that answers with a contact sheet should not spend the whole window on
-# it, and a local vision model pays for every tile at full resolution.
 MAX_MODEL_IMAGES = 4
 MAX_IMAGE_EDGE = 1024
 
 
 def split_images(result: str) -> tuple[str, list[dict]]:
-    """Split a tool result into the text the model reads and its image envelope.
-
-    Validated rather than split on sight, so legit tool text that merely mentions
-    the marker is not truncated.
-    """
+    """Validated, so tool text that merely mentions the marker is not truncated."""
     head, sep, payload = result.rpartition("\n" + SENTINEL)
     if not sep:
         return result, []
@@ -60,7 +49,6 @@ def has_images(result: str) -> bool:
 
 
 def content_parts(images: Sequence[dict]) -> list[dict]:
-    """The images as OpenAI ``image_url`` parts, dropping any that will not decode."""
     parts = []
     for image in images[:MAX_MODEL_IMAGES]:
         url = _png_data_url(image.get("data", ""))
@@ -93,14 +81,8 @@ def _png_data_url(data: str) -> str | None:
 
 
 def append_image_turn(conversation: list, images: Sequence[dict]) -> None:
-    """Append a batch's images as one user turn.
-
-    A user turn, not the ``role=tool`` result they came with: OpenAI-shaped tool
-    messages take no image parts, and local templates render tool content as a
-    string. Appended after the whole batch so an image never splits an
-    assistant's ``tool_calls`` from their results, and merged into a trailing
-    user turn so the roles keep alternating.
-    """
+    """A user turn, not the ``role=tool`` result they came with: tool messages take
+    no image parts, and local templates render tool content as a string."""
     parts = content_parts(images)
     if not parts:
         return
@@ -118,12 +100,8 @@ def append_image_turn(conversation: list, images: Sequence[dict]) -> None:
 
 
 def promote_history(messages: Sequence[dict], *, vision: bool) -> list[dict]:
-    """Turn replayed envelopes back into image turns, so a follow-up question
-    about an earlier tool's picture still has the picture.
-
-    The envelope always leaves the tool text, vision or not: a model that cannot
-    see the image must not be shown a megabyte of base64 either.
-    """
+    """Rebuild image turns from replayed envelopes. The envelope leaves the tool
+    text either way: a text-only model must not be shown its base64."""
     out: list[dict] = []
     pending: list[dict] = []
     for message in messages:
@@ -134,9 +112,8 @@ def promote_history(messages: Sequence[dict], *, vision: bool) -> list[dict]:
             out.append({**message, "content": text or "[image returned]"} if images else message)
             continue
         if pending and vision and message.get("role") == "user":
-            # Merged rather than inserted ahead of it: a turn cancelled mid-tool
-            # leaves the results as the newest history, and two user turns in a
-            # row is what a strict template rejects.
+            # Merged, not inserted ahead of it: two user turns in a row is what
+            # a strict template rejects.
             out.append(_with_image_parts(message, pending))
             pending.clear()
             continue

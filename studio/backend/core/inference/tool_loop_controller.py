@@ -325,7 +325,6 @@ class ToolCallCompletion:
         return message
 
     def mcp_images(self) -> list[dict]:
-        """Images this call returned, for the loops that can show them to the model."""
         return split_mcp_images(self.result)[1] if self.executed else []
 
 
