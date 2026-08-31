@@ -119,8 +119,7 @@ def test_strip_removes_only_valid_terminal_envelope():
         '\n__MCP_IMAGES__:[{"data": "AAAA", "mimeType": "image/png"}]'
     )
     assert strip_result_for_model(text) == (
-        "Earlier mention: __MCP_IMAGES__: is documented here"
-        "\n[1 image returned]"
+        "Earlier mention: __MCP_IMAGES__: is documented here\n[1 image returned]"
     )
 
 
