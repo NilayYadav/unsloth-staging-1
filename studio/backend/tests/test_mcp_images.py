@@ -241,3 +241,96 @@ def test_placeholder_turn_marks_one_image_per_payload():
     turn = mcp_images.placeholder_turn(2)
 
     assert [part["type"] for part in turn["content"]] == ["image", "image", "text"]
+
+
+def test_a_turn_says_when_it_carries_fewer_than_the_tool_returned():
+    returned = MAX_MODEL_IMAGES + 2
+    conversation = [{"role": "tool", "content": f"[{returned} images returned]"}]
+
+    append_image_turn(conversation, [_image() for _ in range(returned)])
+
+    text = conversation[-1]["content"][0]["text"]
+    assert text.startswith(IMAGE_TURN_TEXT)
+    assert f"first {MAX_MODEL_IMAGES} of {returned}" in text
+
+
+def test_a_turn_that_carries_them_all_says_nothing_extra():
+    conversation = [{"role": "tool", "content": "[1 image returned]"}]
+
+    append_image_turn(conversation, [_image()])
+
+    assert conversation[-1]["content"][0]["text"] == IMAGE_TURN_TEXT
+
+
+def test_a_placeholder_turn_reports_the_pictures_it_had_to_drop():
+    turn = mcp_images.placeholder_turn(MAX_MODEL_IMAGES, MAX_MODEL_IMAGES + 3)
+
+    assert f"first {MAX_MODEL_IMAGES} of {MAX_MODEL_IMAGES + 3}" in turn["content"][-1]["text"]
+
+
+def _marker_count(conversation) -> int:
+    return sum(
+        1
+        for message in conversation
+        if isinstance(message.get("content"), list)
+        for part in message["content"]
+        if part.get("type") == "image"
+    )
+
+
+def test_a_long_loop_stops_accumulating_pictures():
+    conversation = []
+    payloads = []
+    for _ in range(6):
+        conversation.append(mcp_images.placeholder_turn(3))
+        payloads.extend(["p"] * 3)
+        mcp_images.trim_image_turns(conversation, payloads)
+
+    assert len(payloads) == mcp_images.MAX_TOTAL_MODEL_IMAGES
+    assert _marker_count(conversation) == len(payloads)
+
+
+def test_trimming_keeps_the_newest_pictures():
+    conversation = [mcp_images.placeholder_turn(2), mcp_images.placeholder_turn(2)]
+    payloads = ["old_a", "old_b", "new_a", "new_b"]
+
+    mcp_images.trim_image_turns(conversation, payloads, limit = 2)
+
+    assert payloads == ["new_a", "new_b"]
+    assert _marker_count(conversation) == 2
+
+
+def test_trimming_drops_a_turn_that_has_no_pictures_left():
+    conversation = [mcp_images.placeholder_turn(1), mcp_images.placeholder_turn(1)]
+    payloads = ["old", "new"]
+
+    mcp_images.trim_image_turns(conversation, payloads, limit = 1)
+
+    assert len(conversation) == 1
+    assert _marker_count(conversation) == 1
+
+
+def test_trimming_keeps_a_users_own_words_when_it_takes_their_picture():
+    conversation = [
+        {
+            "role": "user",
+            "content": [{"type": "image"}, {"type": "text", "text": "what is this"}],
+        },
+        mcp_images.placeholder_turn(1),
+    ]
+    payloads = ["theirs", "tools"]
+
+    mcp_images.trim_image_turns(conversation, payloads, limit = 1)
+
+    assert conversation[0]["content"] == [{"type": "text", "text": "what is this"}]
+    assert _marker_count(conversation) == 1
+
+
+def test_trimming_leaves_a_conversation_under_the_limit_alone():
+    conversation = [mcp_images.placeholder_turn(2)]
+    payloads = ["a", "b"]
+
+    mcp_images.trim_image_turns(conversation, payloads)
+
+    assert payloads == ["a", "b"]
+    assert len(conversation) == 1
