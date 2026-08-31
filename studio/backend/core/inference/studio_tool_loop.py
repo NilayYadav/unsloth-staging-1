@@ -64,6 +64,7 @@ from core.inference.tool_call_parser import (
     reprompt_to_act_message,
     strip_tool_markup,
 )
+from core.inference.mcp_images import append_image_turn as append_mcp_image_turn
 from core.inference.tool_loop_controller import (
     ToolLoopController,
     awaiting_approval_status,
@@ -334,6 +335,7 @@ class ToolLoopRun:
     model: str | None = None
     tool_choice: Any = None
     continue_final_message: bool = False
+    supports_vision: bool = False
 
 
 @dataclass(frozen = True)
@@ -1088,6 +1090,7 @@ async def stream_with_studio_tools(
         assistant_tool_calls: list[dict[str, Any]] = []
         tool_messages: list[dict[str, Any]] = []
         noop_messages: list[dict[str, Any]] = []
+        turn_mcp_images: list[dict[str, Any]] = []
         turn_executed_real_tool = False
 
         for call in calls:
@@ -1348,6 +1351,7 @@ async def stream_with_studio_tools(
             last_reprompt_text = ""
             yield _sse(completion.tool_end_event())
             tool_messages.append(completion.tool_message())
+            turn_mcp_images.extend(completion.mcp_images())
 
         # An empty status clears the badge between iterations.
         yield _status_sse("")
@@ -1390,6 +1394,9 @@ async def stream_with_studio_tools(
             conversation,
             "\n\n".join(dict.fromkeys(message["content"] for message in noop_messages)),
         )
+        if turn_mcp_images and run.supports_vision:
+            # Off the event loop: each image is decoded and re-encoded.
+            await asyncio.to_thread(append_mcp_image_turn, conversation, turn_mcp_images)
 
         if turn_executed_real_tool:
             max_reprompts = _MAX_POST_TOOL_REPROMPTS

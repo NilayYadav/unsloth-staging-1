@@ -609,7 +609,7 @@ def test_mlx_vlm_reemits_think_prefill_inside_adapter_context(monkeypatch):
     backend = MLXInferenceBackend()
     backend._model = SimpleNamespace(config = {"model_type": "deepseek_vl_v2"})
     backend._processor = SimpleNamespace(tokenizer = SimpleNamespace())
-    args = ([{"role": "user", "content": [{"type": "image"}]}], object(), 0, 1, 0, 0, 1, 1, None)
+    args = ([{"role": "user", "content": [{"type": "image"}]}], [object()], 0, 1, 0, 0, 1, 1, None)
 
     gen = backend._generate_vlm(*args, _adapter_state = False)
     # First snapshot is the prefill alone, emitted after entering the adapter context.
@@ -675,7 +675,7 @@ def test_mlx_vlm_generation_selects_renderer_by_capability(monkeypatch):
     backend = MLXInferenceBackend()
     backend._model = SimpleNamespace(config = {"model_type": "deepseek_vl_v2"})
     backend._processor = SimpleNamespace(tokenizer = SimpleNamespace())
-    args = ([{"role": "user", "content": [{"type": "image"}]}], object(), 0, 1, 0, 0, 1, 1, None)
+    args = ([{"role": "user", "content": [{"type": "image"}]}], [object()], 0, 1, 0, 0, 1, 1, None)
     tools = [{"function": {"name": "search"}}]
     generator = backend._generate_vlm(*args, _adapter_state = False)
     assert next(generator) == "ok"
@@ -695,7 +695,7 @@ def test_mlx_vlm_generation_selects_renderer_by_capability(monkeypatch):
     assert calls["stream"][-1][0][2] == "<image> healthy generic"
     state["generic"] = "generic prompt"
     text_messages = [{"role": "user", "content": "hello"}]
-    assert list(backend._generate_vlm(*((text_messages, None) + args[2:]), tools = tools)) == ["ok"]
+    assert list(backend._generate_vlm(*((text_messages, []) + args[2:]), tools = tools)) == ["ok"]
     assert calls["generic"][-1]["tools"] == tools
     assert calls["stream"][-1][0][2] == "generic prompt"
     two_images = [{"role": "user", "content": [{"type": "image"}, {"type": "image"}]}]
@@ -2970,7 +2970,7 @@ def test_vlm_seed_rides_on_the_sampler_not_a_seed_kwarg(monkeypatch):
     backend._processor = SimpleNamespace(chat_template = "template")
     args = (
         [{"role": "user", "content": [{"type": "image"}]}],
-        object(),
+        [object()],
         0.7,
         0.9,
         40,

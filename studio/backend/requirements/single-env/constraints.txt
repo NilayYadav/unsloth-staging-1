@@ -11,7 +11,7 @@ datasets==4.3.0
 pyarrow==23.0.1
 
 # FastMCP compat
-fastmcp>=3.0.2
+fastmcp>=3.0.2,<4
 mcp>=1.24,<2
 websockets>=15.0.1
 

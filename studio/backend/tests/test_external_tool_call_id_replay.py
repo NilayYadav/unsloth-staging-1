@@ -162,3 +162,60 @@ def test_replay_is_idempotent_for_every_provider():
         once, _ = _replayed_ids(MINTED, provider_type = provider)
         twice, paired = _replayed_ids(once, provider_type = provider)
         assert twice == once == paired, (provider, once, twice)
+
+
+def _mcp_image_history():
+    import base64
+    import io
+    import json
+
+    from PIL import Image
+
+    from core.inference import mcp_images
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (6, 6), (10, 120, 200)).save(buffer, format = "PNG")
+    envelope = json.dumps(
+        [{"data": base64.b64encode(buffer.getvalue()).decode(), "mimeType": "image/png"}]
+    )
+    return [
+        ChatMessage.model_validate(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": ORIGINAL,
+                        "type": "function",
+                        "function": {"name": "mcp__fs__read_media_file", "arguments": "{}"},
+                    }
+                ],
+            }
+        ),
+        ChatMessage.model_validate(
+            {
+                "role": "tool",
+                "tool_call_id": ORIGINAL,
+                "content": "[1 image returned]\n" + mcp_images.SENTINEL + envelope,
+            }
+        ),
+    ]
+
+
+def test_replayed_mcp_images_become_an_image_turn_on_a_vision_provider():
+    out = _build_external_messages(
+        _mcp_image_history(), supports_vision = True, provider_type = "openai"
+    )
+
+    assert [message["role"] for message in out] == ["assistant", "tool", "user"]
+    assert out[1]["content"] == "[1 image returned]"
+    assert out[2]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_replayed_mcp_images_are_stripped_on_a_text_only_provider():
+    out = _build_external_messages(
+        _mcp_image_history(), supports_vision = False, provider_type = "openai"
+    )
+
+    assert [message["role"] for message in out] == ["assistant", "tool"]
+    assert out[1]["content"] == "[1 image returned]"

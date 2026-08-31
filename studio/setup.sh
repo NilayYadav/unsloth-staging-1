@@ -1856,6 +1856,8 @@ import os, sys
 sys.path.insert(0, sys.argv[1])
 try:
     import install_manifest
+    if os.path.dirname(os.path.abspath(install_manifest.__file__)) != os.path.abspath(sys.argv[1]):
+        raise ImportError
 except Exception:
     # Present but unimportable is damage, not an old release, and this is the
     # one file whose damage silences every check below. Absent keeps the old

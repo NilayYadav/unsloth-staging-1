@@ -3646,6 +3646,73 @@ class TestGgufVisionMessages:
             {"role": "system", "content": "Use tools."}
         ]
 
+    def _mcp_tool_history(self, text = "[1 image returned]"):
+        from core.inference import mcp_images
+        envelope = json.dumps([{"data": self._PNG_B64, "mimeType": "image/png"}])
+        return [
+            {"role": "user", "content": "what does the file look like"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {"name": "mcp__fs__read_media_file", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_0",
+                "content": text + "\n" + mcp_images.SENTINEL + envelope,
+            },
+            {"role": "assistant", "content": "a blue square"},
+            {"role": "user", "content": "what colour was it again"},
+        ]
+
+    def test_replayed_mcp_images_become_an_image_turn_for_a_vision_model(self):
+        req = ChatCompletionRequest(model = "default", messages = self._mcp_tool_history())
+
+        messages, _ = _openai_messages_for_gguf_chat(req, is_vision = True)
+
+        tool_message = next(m for m in messages if m["role"] == "tool")
+        assert tool_message["content"] == "[1 image returned]"
+        promoted = messages[messages.index(tool_message) + 1]
+        assert promoted["role"] == "user"
+        assert promoted["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_replayed_mcp_images_are_stripped_for_a_text_only_model(self):
+        req = ChatCompletionRequest(model = "default", messages = self._mcp_tool_history())
+
+        messages, _ = _openai_messages_for_gguf_chat(req, is_vision = False)
+
+        assert [m["role"] for m in messages] == ["user", "assistant", "tool", "assistant", "user"]
+        assert messages[2]["content"] == "[1 image returned]"
+
+    def test_passthrough_never_relays_the_image_envelope_as_tool_text(self):
+        req = ChatCompletionRequest(model = "default", messages = self._mcp_tool_history())
+
+        messages = _openai_messages_for_passthrough(req)
+
+        assert all("__MCP_IMAGES__" not in str(m.get("content")) for m in messages)
+
+    def test_passthrough_promotes_the_images_for_a_vision_model(self):
+        req = ChatCompletionRequest(model = "default", messages = self._mcp_tool_history())
+
+        messages = _openai_messages_for_passthrough(req, vision = True)
+
+        promoted = messages[3]
+        assert promoted["role"] == "user"
+        assert promoted["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_the_native_path_never_templates_the_image_envelope(self):
+        req = ChatCompletionRequest(model = "default", messages = self._mcp_tool_history())
+
+        _, chat_messages, _ = _extract_content_parts(req.messages)
+
+        assert chat_messages[2] == {"role": "tool", "content": "[1 image returned]"}
+
     def test_tool_nudge_system_update_dedupes_non_leading_system(self):
         messages = [
             {"role": "user", "content": "earlier"},

@@ -1172,3 +1172,53 @@ def test_completion_details_are_summed_with_the_completion_they_describe():
     )
     assert folded["usage"]["completion_tokens"] == 50
     assert folded["usage"]["completion_tokens_details"] == {"reasoning_tokens": 10}
+
+
+_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mNk"
+    "+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+)
+
+
+class _VisionToolLoopBackend(_ToolLoopBackend):
+    def __init__(self, responder, **kwargs):
+        super().__init__(responder, **kwargs)
+        self.models["sf-model"]["is_vision"] = True
+
+    @staticmethod
+    def resize_image(image):
+        return image
+
+
+def test_an_attached_image_still_reaches_the_tool_loop(monkeypatch):
+    backend = _VisionToolLoopBackend(_fixed("done"))
+    payload = _request(
+        messages = [
+            ChatMessage(
+                role = "user",
+                content = [
+                    {"type": "text", "text": "what is in this picture"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{_PNG_B64}"},
+                    },
+                ],
+            )
+        ],
+        enable_tools = True,
+        stream = False,
+    )
+
+    _call(payload, monkeypatch, backend)
+
+    [call] = backend.calls
+    assert call["tools"], "tools must survive an attached image on a vision model"
+    assert call["images"], "the attachment has to ride into the loop"
+    markers = [
+        part
+        for message in call["messages"]
+        if isinstance(message.get("content"), list)
+        for part in message["content"]
+        if part.get("type") == "image"
+    ]
+    assert len(markers) == len(call["images"])
