@@ -425,6 +425,7 @@ from core.inference.tool_call_parser import (
 )
 from core.inference.passthrough_healing import nudge_enabled as _nudge_enabled
 from core.inference.repetition_guard import is_repetition_dominated
+from core.inference.mcp_images import append_image_turn as append_mcp_image_turn
 from core.inference.tool_loop_controller import (
     ToolLoopController,
     append_deferred_nudges,
@@ -29705,6 +29706,7 @@ class LlamaCppBackend:
                 # Which tools those no-ops were about, so the flush below can tell
                 # whether the trailing result belongs to the same tool.
                 deferred_noop_tools: set = set()
+                batch_mcp_images: list = []
 
                 # The text-path provisional card uses the parser's default id ("call_0");
                 # a Mistral-style call carries its own id and would open a duplicate. Reuse
@@ -30523,6 +30525,7 @@ class LlamaCppBackend:
                     _forced_choice_resolved = True
                     yield completion.tool_end_event()
                     conversation.append(completion.tool_message())
+                    batch_mcp_images.extend(completion.mcp_images())
                     if _compact_after_execution and decision.tool_call_id:
                         # The promise the gate made when it let this run. Applied here
                         # rather than on the next pass because the next pass may not
@@ -30611,6 +30614,9 @@ class LlamaCppBackend:
                         )
                         assistant_appended = True
                     append_deferred_nudges(conversation, deferred_noop_msgs)
+
+                if batch_mcp_images and self.is_vision:
+                    append_mcp_image_turn(conversation, batch_mcp_images)
 
                 # Close provisional cards not resolved by execution/no-op handling.
                 for _pid, _pname in provisional_started_tool_calls.items():

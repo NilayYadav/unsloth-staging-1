@@ -3031,6 +3031,13 @@ from state.tool_approvals import resolve_tool_decision
 from core.inference.model_ids import display_model_name, model_id_matches, public_model_id
 from core.inference.api_monitor import api_monitor
 from core.inference.llama_http import nonstreaming_client
+from core.inference.mcp_images import (
+    has_images as mcp_images_sentinel_in,
+    mark_last_user_turn as mark_mcp_image_turn,
+    promote_history as promote_mcp_history_images,
+    promote_history_local as promote_mcp_history_images_local,
+    split_images as split_mcp_images,
+)
 from core.inference.tool_call_parser import (
     _strip_function_xml_calls,
     _strip_gemma_wrapperless_calls,
@@ -7091,7 +7098,15 @@ def _messages_have_remote_image(messages) -> bool:
 def _request_has_image(payload) -> bool:
     if getattr(payload, "image_base64", None):
         return True
-    return _messages_have_image(payload.messages)
+    if _messages_have_image(payload.messages):
+        return True
+    # A replayed envelope is decoded and re-encoded like any other image.
+    return any(
+        message.role == "tool"
+        and isinstance(message.content, str)
+        and mcp_images_sentinel_in(message.content)
+        for message in payload.messages
+    )
 
 
 def _anthropic_request_has_image(payload) -> bool:
@@ -17723,7 +17738,9 @@ def _inject_audio_part(messages: list[dict], audio_b64: str, audio_format: str) 
             return
 
 
-def _extract_content_parts(messages: list) -> tuple[str, list[dict], "Optional[str]"]:
+def _extract_content_parts(
+    messages: list, *, keep_tool_images: bool = False
+) -> tuple[str, list[dict], "Optional[str]"]:
     """
     Parse OpenAI-format messages into components the inference backend expects.
 
@@ -17793,6 +17810,8 @@ def _extract_content_parts(messages: list) -> tuple[str, list[dict], "Optional[s
 
         if combined_text is None:
             continue
+        if msg.role == "tool" and not keep_tool_images:
+            combined_text = split_mcp_images(combined_text)[0]
         chat_message = {"role": msg.role, "content": combined_text}
         if msg.role == "assistant" and msg.reasoning_content:
             chat_message["reasoning_content"] = msg.reasoning_content
@@ -18312,7 +18331,7 @@ def _build_external_messages(
                 entry["tool_calls"] = _replay_tool_call_ids(entry["tool_calls"], replay_ids)
             if isinstance(entry.get("tool_call_id"), str):
                 entry["tool_call_id"] = replay_ids.get(entry["tool_call_id"], entry["tool_call_id"])
-    return result
+    return promote_mcp_history_images(result, vision = supports_vision)
 
 
 async def _proxy_to_external_provider(
@@ -18678,6 +18697,7 @@ async def _proxy_to_external_provider(
                 response_format = _extract_response_format(payload),
                 tool_choice = payload.tool_choice,
                 continue_final_message = _continue_final_message(payload),
+                supports_vision = model_supports_vision,
             )
             policy = (
                 CodexToolPolicy(
@@ -19007,6 +19027,7 @@ async def _proxy_to_external_provider(
                     model = model,
                     tool_choice = payload.tool_choice,
                     continue_final_message = _continue_final_message(payload),
+                    supports_vision = _supports_vision,
                 ),
                 policy = ToolLoopPolicy(
                     tools = external_studio_tools,
@@ -19538,7 +19559,7 @@ async def produce_openai_chat_completions(
     _preprepared_audio = None
     _image_preflight = None
     if _should_validate_before_switch():
-        _pre_parsed = _extract_content_parts(payload.messages)
+        _pre_parsed = _extract_content_parts(payload.messages, keep_tool_images = True)
         if not _pre_parsed[1]:
             raise HTTPException(
                 status_code = 400, detail = "At least one non-system message is required."
@@ -20310,7 +20331,9 @@ async def produce_openai_chat_completions(
     if _pre_parsed is not None:
         system_prompt, chat_messages, extracted_image_b64 = _pre_parsed
     else:
-        system_prompt, chat_messages, extracted_image_b64 = _extract_content_parts(payload.messages)
+        system_prompt, chat_messages, extracted_image_b64 = _extract_content_parts(
+            payload.messages, keep_tool_images = True
+        )
     # applied once so both backends inherit it, with or without tools, and never state it twice.
     system_prompt = _apply_current_date_prompt(system_prompt, request)
 
@@ -22059,6 +22082,11 @@ async def produce_openai_chat_completions(
 
     # Classify capability flags from the loaded template.
     _sf_model_info = backend.models.get(backend.active_model_name, {})
+    # Strips for a text-only model, rebuilds the picture as a marker turn for one
+    # that reads images; either way no envelope reaches the template.
+    chat_messages, sf_mcp_images = promote_mcp_history_images_local(
+        chat_messages, vision = bool(_sf_model_info.get("is_vision"))
+    )
     _sf_tpl = (_sf_model_info.get("chat_template_info") or {}).get("template")
     # Resolve the tool policy BEFORE the protocol is classified: the template
     # branch chosen here must be the one generation renders. Reading the raw
@@ -22176,7 +22204,9 @@ async def produce_openai_chat_completions(
     _sf_use_tools = (
         (_sf_tools_on or _sf_mcp_allowed)
         and _sf_features.get("supports_tools", False)
-        and image is None
+        # An attachment used to withdraw the tools: the loop had no way to carry
+        # a picture. It has one now, so only a model that cannot read images does.
+        and (image is None or bool(_sf_model_info.get("is_vision")))
         and not _sf_is_gptoss
         and _sf_tool_budget > 0
     )
@@ -22272,6 +22302,13 @@ async def produce_openai_chat_completions(
             else:
                 _sf_chat_messages.append(_msg)
 
+        # The attachment rides in last, matching where its marker sits: the MCP
+        # pictures came from earlier turns.
+        _sf_loop_images = list(sf_mcp_images)
+        if image is not None:
+            _sf_chat_messages = mark_mcp_image_turn(_sf_chat_messages, 1)
+            _sf_loop_images.append(_pil_to_png_b64(image))
+
         # Request-scoped usage/timings receptacle (filled at gen_done).
         _sf_stats_holder: dict = {}
 
@@ -22280,6 +22317,7 @@ async def produce_openai_chat_completions(
                 messages = _sf_chat_messages,
                 tools = _sf_tools_to_use,
                 system_prompt = _sf_system_prompt or "",
+                images = _sf_loop_images or None,
                 temperature = payload.temperature,
                 top_p = payload.top_p,
                 top_k = payload.top_k,
@@ -22668,6 +22706,7 @@ async def produce_openai_chat_completions(
         messages = chat_messages,
         system_prompt = system_prompt,
         image = image,
+        images = sf_mcp_images or None,
         temperature = payload.temperature,
         top_p = payload.top_p,
         top_k = payload.top_k,
@@ -22704,7 +22743,9 @@ async def produce_openai_chat_completions(
         # recomputing here would hide that and drop the client catalog.
         not _sf_tools_on
         and not _sf_use_tools
-        and image is None
+        # Same rule as the server-side gate above: only a model that cannot read
+        # images has to give its tools up for one.
+        and (image is None or bool(_sf_model_info.get("is_vision")))
         and not _sf_is_gptoss
         and _sf_features.get("supports_tools", False)
         and ((payload.tools and len(payload.tools) > 0) or _sf_has_tool_msgs)
@@ -27000,6 +27041,12 @@ def _select_anthropic_server_tools(
     return [tool for tool in all_tools if tool["function"]["name"] in selected_names]
 
 
+def _pil_to_png_b64(img) -> str:
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format = "PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 def _image_bytes_to_png_b64(raw: bytes) -> str:
     """Decode raw image bytes and re-encode to a base64-ascii PNG string.
 
@@ -30041,7 +30088,7 @@ def _splice_image_into_last_user(messages: list[dict], image_part: dict) -> None
         messages.append({"role": "user", "content": [image_part]})
 
 
-def _openai_messages_for_passthrough(payload) -> list[dict]:
+def _openai_messages_for_passthrough(payload, vision: bool = False) -> list[dict]:
     """Build OpenAI-format message dicts for the /v1/chat/completions
     passthrough path.
 
@@ -30062,8 +30109,13 @@ def _openai_messages_for_passthrough(payload) -> list[dict]:
     against a reservation for one: 4417 reserved against 8466 charged, which overcommits
     the KV cache wherever the slot count lets that gap accumulate.
     """
-    messages = _strip_provider_synthetic_tool_history(
-        _drop_empty_assistant_sentinels([m.model_dump(exclude_none = True) for m in payload.messages])
+    messages = promote_mcp_history_images(
+        _strip_provider_synthetic_tool_history(
+            _drop_empty_assistant_sentinels(
+                [m.model_dump(exclude_none = True) for m in payload.messages]
+            )
+        ),
+        vision = vision,
     )
 
     if not _legacy_image_is_distinct(payload):
@@ -30165,7 +30217,7 @@ def _openai_messages_for_gguf_chat(payload, is_vision: bool) -> tuple[list[dict]
         }
         _splice_image_into_last_user(messages, image_part)
     has_image = _normalize_anthropic_openai_images(messages, is_vision)
-    return messages, has_image
+    return promote_mcp_history_images(messages, vision = is_vision), has_image
 
 
 async def _openai_messages_for_gguf_chat_async(payload, is_vision: bool) -> tuple[list[dict], bool]:
@@ -30209,7 +30261,9 @@ def _build_openai_passthrough_body(
     extensions (``enable_tools``, ``enabled_tools``, ``session_id``, ...) never
     leak to the backend.
     """
-    messages = _openai_messages_for_passthrough(payload)
+    messages = _openai_messages_for_passthrough(
+        payload, vision = bool(getattr(llama_backend, "is_vision", False))
+    )
     system_prompt, _, _ = _extract_content_parts(payload.messages)
     messages = _set_or_prepend_system_message(messages, system_prompt)
     # Markup is broken in _build_passthrough_payload, shared with both /v1/messages (#7066).

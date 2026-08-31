@@ -5323,3 +5323,80 @@ class TestStreamingDisplayStripStillMatchesTheExportedHelper:
             assert incremental == strip_tool_markup_streaming(
                 prefix, enabled_tool_names = names
             ), f"diverged at offset {i}"
+
+
+def test_mcp_images_reach_a_vision_model_through_the_sink(monkeypatch):
+    import base64
+    import io
+    import json
+
+    from PIL import Image
+
+    from core.inference import mcp_images
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (6, 6), (10, 120, 200)).save(buffer, format = "PNG")
+    envelope = json.dumps(
+        [{"data": base64.b64encode(buffer.getvalue()).decode(), "mimeType": "image/png"}]
+    )
+    result = "[1 image returned]\n" + mcp_images.SENTINEL + envelope
+
+    turns = [
+        '<tool_call>{"name": "mcp__fs__read_media_file", "arguments": {}}</tool_call>',
+        "A tabby cat.",
+    ]
+    seen: list[list] = []
+
+    def single_turn(conversation, *, active_tools = None):
+        seen.append([dict(message) for message in conversation])
+        yield turns[len(seen) - 1]
+
+    sink: list = []
+    list(
+        run_safetensors_tool_loop(
+            single_turn = single_turn,
+            messages = [{"role": "user", "content": "describe the image"}],
+            tools = [{"type": "function", "function": {"name": "mcp__fs__read_media_file"}}],
+            execute_tool = lambda name, args, **kwargs: result,
+            max_tool_iterations = 2,
+            images_sink = sink,
+        )
+    )
+
+    assert len(sink) == 1
+    assert base64.b64decode(sink[0])[:8] == b"\x89PNG\r\n\x1a\n"
+    second_turn = seen[1]
+    assert "__MCP_IMAGES__" not in json.dumps(second_turn)
+    assert second_turn[-1]["role"] == "user"
+    assert second_turn[-1]["content"][0] == {"type": "image"}
+
+
+def test_mcp_images_are_left_out_without_a_sink(monkeypatch):
+    import json
+
+    from core.inference import mcp_images
+
+    envelope = json.dumps([{"data": "QUJD", "mimeType": "image/png"}])
+    result = "[1 image returned]\n" + mcp_images.SENTINEL + envelope
+    turns = [
+        '<tool_call>{"name": "mcp__fs__read_media_file", "arguments": {}}</tool_call>',
+        "A tabby cat.",
+    ]
+    seen: list[list] = []
+
+    def single_turn(conversation, *, active_tools = None):
+        seen.append([dict(message) for message in conversation])
+        yield turns[len(seen) - 1]
+
+    list(
+        run_safetensors_tool_loop(
+            single_turn = single_turn,
+            messages = [{"role": "user", "content": "describe the image"}],
+            tools = [{"type": "function", "function": {"name": "mcp__fs__read_media_file"}}],
+            execute_tool = lambda name, args, **kwargs: result,
+            max_tool_iterations = 2,
+        )
+    )
+
+    assert seen[1][-1]["role"] == "tool"
+    assert "__MCP_IMAGES__" not in json.dumps(seen[1])

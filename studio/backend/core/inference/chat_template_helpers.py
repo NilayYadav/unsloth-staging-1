@@ -2986,6 +2986,7 @@ def render_prompt_with_boundary(
     processor,
     messages: list,
     continue_final_message: bool = False,
+    tools: Optional[list] = None,
 ) -> str:
     """Render *messages* through a renderer's own chat template.
 
@@ -2993,7 +2994,20 @@ def render_prompt_with_boundary(
     the model resumes it. Processors predating the kwarg get a manual splice, taking the
     partial from *messages* (which the caller already swept) rather than a separate copy:
     a raw partial could close the turn or open another role instead of resuming (#7066).
+
+    A picture renders here instead of on the text path, so *tools* has to reach the
+    template through this function or an image-carrying turn is prompted without the
+    catalog the loop is still parsing calls against. The catalog is rendered by the
+    shared choke point rather than a second, thinner copy of its TypeError ladder: an
+    attempt that drops ``tools=`` also has to re-sweep the messages it renders (#7066).
     """
+    if tools:
+        return apply_chat_template_for_generation(
+            processor,
+            messages,
+            tools = tools,
+            continue_final_message = continue_final_message,
+        )
     partial = trailing_assistant_text(messages) if continue_final_message else None
     if not partial:
         return processor.apply_chat_template(messages, add_generation_prompt = True, tokenize = False)

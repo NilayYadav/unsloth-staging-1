@@ -38,6 +38,7 @@ import {
   sandboxSessionIdFor,
 } from "@/components/assistant-ui/sandbox-files";
 import { apiUrl } from "@/lib/api-base";
+import { mcpImagesEnvelope, splitMcpImages } from "./mcp-images";
 import {
   answerTextFromParts,
   extractSearchImages,
@@ -1179,6 +1180,9 @@ function serializeToolResultPart(
       ? stripSearchImageTokens(result.text)
       : result.text;
     content = replayText.length > 0 ? replayText : JSON.stringify({ result: "" });
+    if (isMcpImageToolResult(result)) {
+      content += mcpImagesEnvelope(result.images);
+    }
   } else {
     try {
       content = JSON.stringify(result);
@@ -6599,8 +6603,6 @@ export function createOpenAIStreamAdapter(
                         : { text: rawResult, images: [] as SearchImageEntry[] };
                     const imgMarker = "\n__IMAGES__:";
                     const imgIdx = rawResult.lastIndexOf(imgMarker);
-                    const mcpImgMarker = "\n__MCP_IMAGES__:";
-                    const mcpImgIdx = rawResult.lastIndexOf(mcpImgMarker);
                     let parsedResult:
                       | string
                       | {
@@ -6623,22 +6625,9 @@ export function createOpenAIStreamAdapter(
                     // A valid MCP image envelope wins; an invalid marker falls
                     // through so a sandbox __IMAGES__ suffix still renders and
                     // legit text round-trips unchanged.
-                    let mcpImages: McpImageToolResult | null = null;
-                    if (mcpImgIdx !== -1) {
-                      try {
-                        const images = JSON.parse(
-                          rawResult.slice(mcpImgIdx + mcpImgMarker.length),
-                        );
-                        const candidate = {
-                          text: rawResult.slice(0, mcpImgIdx),
-                          images,
-                        };
-                        if (isMcpImageToolResult(candidate))
-                          mcpImages = candidate;
-                      } catch {
-                        // Not a valid envelope; fall through below.
-                      }
-                    }
+                    const mcpCandidate = splitMcpImages(rawResult);
+                    const mcpImages: McpImageToolResult | null =
+                      isMcpImageToolResult(mcpCandidate) ? mcpCandidate : null;
                     if (
                       toolCallParts[idx].toolName === "image_generation" &&
                       typeof imageB64 === "string" &&
